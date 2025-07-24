@@ -362,6 +362,55 @@ def text_to_speech(
         print(traceback.format_exc())
         return f"❌ {error_msg}", None
 
+### SkyrimNet Zonos Emulated
+def generate_audio(
+    model_choice = None,
+    text= "On that first day from Saturalia, My missus gave for me, A big bowl of moon sugar!",
+    language= "en",
+    speaker_audio= None,
+    prefix_audio= None,
+    e1= None,
+    e2= None,
+    e3= None,
+    e4= None,
+    e5= None,
+    e6= None,
+    e7= None,
+    e8= None,
+    vq_single= None,
+    fmax= None,
+    pitch_std= None,
+    speaking_rate= None,
+    dnsmos_ovrl= None,
+    speaker_noised: bool = None,
+    cfg_scale= 0.3,
+    top_p= 1.0,
+    top_k= None,
+    min_p= 0.5,
+    linear= None,
+    confidence= None,
+    quadratic= None,
+    uuid= -1,
+    randomize_seed: bool = False,
+    unconditional_keys: list = None,
+):
+
+
+    text_output, (sr, audio_data) = text_to_speech(
+        text=text,
+        voice_preset=None,
+        reference_audio=speaker_audio,
+        reference_text=None,
+        max_completion_tokens=4088,
+        temperature=0.3,
+        top_p=0.95,
+        top_k=50,
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        stop_strings=None,
+        ras_win_len=7,
+        ras_win_max_num_repeat=2,
+    )
+    return (sr, audio_data), uuid
 
 def create_ui():
     my_theme = gr.Theme.load("theme.json")
@@ -619,6 +668,70 @@ def create_ui():
             outputs=[output_audio],
             js="() => {const audio = document.querySelector('audio'); if(audio) audio.pause(); return null;}",
         )
+
+        model_choice = gr.Textbox(visible=False)
+        language = gr.Textbox(visible=False)
+        speaker_audio = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Reference Audio File",
+                                 value=None, visible=False)
+        prefix_audio = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Reference Audio File", value=None,
+                                visible=False)
+        emotion1 = gr.Number(visible=False)
+        emotion2 = gr.Number(visible=False)
+        emotion3 = gr.Number(visible=False)
+        emotion4 = gr.Number(visible=False)
+        emotion5 = gr.Number(visible=False)
+        emotion6 = gr.Number(visible=False)
+        emotion7 = gr.Number(visible=False)
+        emotion8 = gr.Number(visible=False)
+        vq_single = gr.Number(visible=False)
+        fmax = gr.Number(visible=False)
+        pitch_std = gr.Number(visible=False)
+        speaking_rate = gr.Number(visible=False)
+        dnsmos = gr.Number(visible=False)
+        speaker_noised_checkbox = gr.Checkbox(visible=False)
+        cfg_scale = gr.Number(visible=False)
+        seed_num = gr.Number(visible=False)
+        min_k = gr.Number(visible=False)
+        min_p = gr.Number(visible=False)
+        linear = gr.Number(visible=False)
+        confidence = gr.Number(visible=False)
+        quadratic = gr.Number(visible=False)
+        randomize_seed_toggle = gr.Checkbox(visible=False)
+        unconditional_keys = gr.Textbox(visible=False)
+        hidden_btn = gr.Button(visible=False)
+        hidden_btn.click(fn=generate_audio, api_name="generate_audio", inputs=[
+            model_choice,
+            input_text,
+            language,
+            speaker_audio,
+            prefix_audio,
+            emotion1,
+            emotion2,
+            emotion3,
+            emotion4,
+            emotion5,
+            emotion6,
+            emotion7,
+            emotion8,
+            vq_single,
+            fmax,
+            pitch_std,
+            speaking_rate,
+            dnsmos,
+            speaker_noised_checkbox,
+            cfg_scale,
+            top_p,
+            min_k,
+            min_p,
+            linear,
+            confidence,
+            quadratic,
+            seed_num,
+            randomize_seed_toggle,
+            unconditional_keys,
+        ],
+                         outputs=[output_audio, seed_num],
+                         )
 
     return demo
 
