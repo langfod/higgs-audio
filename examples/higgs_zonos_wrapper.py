@@ -2,51 +2,23 @@
 
 import os
 import tempfile
-import logging
+import base64
 import torch
 import gradio as gr
 import soundfile as sf
 import langid
 import jieba
 import re
-import copy
-import torchaudio
-import tqdm
-import yaml
 import time
 
 from loguru import logger
 from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine, HiggsAudioResponse
 from boson_multimodal.data_types import Message, ChatMLSample, AudioContent, TextContent
 
-from boson_multimodal.model.higgs_audio import HiggsAudioConfig, HiggsAudioModel
-from boson_multimodal.data_collator.higgs_audio_collator import HiggsAudioSampleCollator
-from boson_multimodal.audio_processing.higgs_audio_tokenizer import load_higgs_audio_tokenizer
-from boson_multimodal.dataset.chatml_dataset import (
-    ChatMLDatasetSample,
-    prepare_chatml_sample,
-)
-from boson_multimodal.model.higgs_audio.utils import revert_delay_pattern
-from typing import List
-from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
-from transformers.cache_utils import StaticCache
-from typing import Optional
-from dataclasses import asdict
-
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 
-BNB_CONF = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16
-)
-
-AUDIO_PLACEHOLDER_TOKEN = "<|__AUDIO_PLACEHOLDER__|>"
-
-MULTISPEAKER_DEFAULT_SYSTEM_MESSAGE = """You are an AI assistant designed to convert text into speech.
-If the user's message includes a [SPEAKER*] tag, do not read out the tag and generate speech for the following text, using the specified voice.
-If no speaker tag is present, select a suitable voice on your own."""
+MODEL_PATH = "bosonai/higgs-audio-v2-generation-3B-base"
+AUDIO_TOKENIZER_PATH = "bosonai/higgs-audio-v2-tokenizer"
 
 
 def normalize_chinese_punctuation(text):
@@ -88,356 +60,56 @@ def normalize_chinese_punctuation(text):
     return text
 
 
-def prepare_chunk_text(
-    text, chunk_method: Optional[str] = None, chunk_max_word_num: int = 100, chunk_max_num_turns: int = 1
-):
-    """Chunk the text into smaller pieces. We will later feed the chunks one by one to the model."""
-    if chunk_method is None:
-        return [text]
-    elif chunk_method == "speaker":
-        lines = text.split("\n")
-        speaker_chunks = []
-        speaker_utterance = ""
-        for line in lines:
-            line = line.strip()
-            if line.startswith("[SPEAKER") or line.startswith("<|speaker_id_start|>"):
-                if speaker_utterance:
-                    speaker_chunks.append(speaker_utterance.strip())
-                speaker_utterance = line
-            else:
-                if speaker_utterance:
-                    speaker_utterance += "\n" + line
-                else:
-                    speaker_utterance = line
-        if speaker_utterance:
-            speaker_chunks.append(speaker_utterance.strip())
-        if chunk_max_num_turns > 1:
-            merged_chunks = []
-            for i in range(0, len(speaker_chunks), chunk_max_num_turns):
-                merged_chunk = "\n".join(speaker_chunks[i : i + chunk_max_num_turns])
-                merged_chunks.append(merged_chunk)
-            return merged_chunks
-        return speaker_chunks
-    elif chunk_method == "word":
-        # TODO: We may improve the logic in the future
-        # For long-form generation, we will first divide the text into multiple paragraphs by splitting with "\n\n"
-        # After that, we will chunk each paragraph based on word count
-        language = langid.classify(text)[0]
-        paragraphs = text.split("\n\n")
-        chunks = []
-        for idx, paragraph in enumerate(paragraphs):
-            if language == "zh":
-                # For Chinese, we will chunk based on character count
-                words = list(jieba.cut(paragraph, cut_all=False))
-                for i in range(0, len(words), chunk_max_word_num):
-                    chunk = "".join(words[i : i + chunk_max_word_num])
-                    chunks.append(chunk)
-            else:
-                words = paragraph.split(" ")
-                for i in range(0, len(words), chunk_max_word_num):
-                    chunk = " ".join(words[i : i + chunk_max_word_num])
-                    chunks.append(chunk)
-            chunks[-1] += "\n\n"
-        return chunks
-    else:
-        raise ValueError(f"Unknown chunk method: {chunk_method}")
+def encode_base64_content_from_file(file_path: str) -> str:
+    """Encode audio file content to base64 format for AudioContent."""
+    with open(file_path, "rb") as audio_file:
+        audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
+    return audio_base64
 
 
-def _build_system_message_with_audio_prompt(system_message):
-    contents = []
-
-    while AUDIO_PLACEHOLDER_TOKEN in system_message:
-        loc = system_message.find(AUDIO_PLACEHOLDER_TOKEN)
-        contents.append(TextContent(system_message[:loc]))
-        contents.append(AudioContent(audio_url=""))
-        system_message = system_message[loc + len(AUDIO_PLACEHOLDER_TOKEN) :]
-
-    if len(system_message) > 0:
-        contents.append(TextContent(system_message))
-    ret = Message(
-        role="system",
-        content=contents,
-    )
-    return ret
-
-
-class HiggsAudioModelClient:
-    def __init__(
-        self,
-        model_path,
-        audio_tokenizer,
-        device_id=None,
-        max_new_tokens=2048,
-        kv_cache_lengths: List[int] = [1024, 4096, 8192],  # Multiple KV cache sizes,
-        use_static_kv_cache=False,
-    ):
-        if device_id is None:
-            self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self._device = f"cuda:{device_id}"
-        self._audio_tokenizer = (
-            load_higgs_audio_tokenizer(audio_tokenizer, device=self._device)
-            if isinstance(audio_tokenizer, str)
-            else audio_tokenizer
-        )
-        self._model = HiggsAudioModel.from_pretrained(
-            model_path,
-            quantization_config=BNB_CONF,
-            device_map=self._device,
-            torch_dtype=torch.bfloat16,
-        )
-        self._model.eval()
-        self._kv_cache_lengths = kv_cache_lengths
-        self._use_static_kv_cache = use_static_kv_cache
-
-        self._tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self._config = AutoConfig.from_pretrained(model_path)
-        self._max_new_tokens = max_new_tokens
-        self._collator = HiggsAudioSampleCollator(
-            whisper_processor=None,
-            audio_in_token_id=self._config.audio_in_token_idx,
-            audio_out_token_id=self._config.audio_out_token_idx,
-            audio_stream_bos_id=self._config.audio_stream_bos_id,
-            audio_stream_eos_id=self._config.audio_stream_eos_id,
-            encode_whisper_embed=self._config.encode_whisper_embed,
-            pad_token_id=self._config.pad_token_id,
-            return_audio_in_tokens=self._config.encode_audio_in_tokens,
-            use_delay_pattern=self._config.use_delay_pattern,
-            round_to=1,
-            audio_num_codebooks=self._config.audio_num_codebooks,
-        )
-        self.kv_caches = None
-        if use_static_kv_cache:
-            self._init_static_kv_cache()
-
-    def _init_static_kv_cache(self):
-        cache_config = copy.deepcopy(self._model.config.text_config)
-        cache_config.num_hidden_layers = self._model.config.text_config.num_hidden_layers
-        if self._model.config.audio_dual_ffn_layers:
-            cache_config.num_hidden_layers += len(self._model.config.audio_dual_ffn_layers)
-        # A list of KV caches for different lengths
-        self.kv_caches = {
-            length: StaticCache(
-                config=cache_config,
-                max_batch_size=1,
-                max_cache_len=length,
-                device=self._model.device,
-                dtype=self._model.dtype,
-            )
-            for length in sorted(self._kv_cache_lengths)
-        }
-        # Capture CUDA graphs for each KV cache length
-        if "cuda" in self._device:
-            logger.info(f"Capturing CUDA graphs for each KV cache length")
-            self._model.capture_model(self.kv_caches.values())
-
-    def _prepare_kv_caches(self):
-        for kv_cache in self.kv_caches.values():
-            kv_cache.reset()
-
-    @torch.inference_mode()
-    def generate(
-        self,
-        messages,
-        audio_ids,
-        chunked_text,
-        generation_chunk_buffer_size,
-        temperature=1.0,
-        top_k=50,
-        top_p=0.95,
-        ras_win_len=7,
-        ras_win_max_num_repeat=2,
-        seed=123,
-        *args,
-        **kwargs,
-    ):
-        if ras_win_len is not None and ras_win_len <= 0:
-            ras_win_len = None
-        sr = 24000
-        audio_out_ids_l = []
-        generated_audio_ids = []
-        generation_messages = []
-        for idx, chunk_text in tqdm.tqdm(
-            enumerate(chunked_text), desc="Generating audio chunks", total=len(chunked_text)
-        ):
-            generation_messages.append(
-                Message(
-                    role="user",
-                    content=chunk_text,
-                )
-            )
-            chatml_sample = ChatMLSample(messages=messages + generation_messages)
-            input_tokens, _, _, _ = prepare_chatml_sample(chatml_sample, self._tokenizer)
-            postfix = self._tokenizer.encode(
-                "<|start_header_id|>assistant<|end_header_id|>\n\n", add_special_tokens=False
-            )
-            input_tokens.extend(postfix)
-
-            logger.info(f"========= Chunk {idx} Input =========")
-            logger.info(self._tokenizer.decode(input_tokens))
-            context_audio_ids = audio_ids + generated_audio_ids
-
-            curr_sample = ChatMLDatasetSample(
-                input_ids=torch.LongTensor(input_tokens),
-                label_ids=None,
-                audio_ids_concat=torch.concat([ele.cpu() for ele in context_audio_ids], dim=1)
-                if context_audio_ids
-                else None,
-                audio_ids_start=torch.cumsum(
-                    torch.tensor([0] + [ele.shape[1] for ele in context_audio_ids], dtype=torch.long), dim=0
-                )
-                if context_audio_ids
-                else None,
-                audio_waveforms_concat=None,
-                audio_waveforms_start=None,
-                audio_sample_rate=None,
-                audio_speaker_indices=None,
-            )
-
-            batch_data = self._collator([curr_sample])
-            batch = asdict(batch_data)
-            for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k] = v.contiguous().to(self._device)
-
-            if self._use_static_kv_cache:
-                self._prepare_kv_caches()
-
-            
-            # Generate audio
-            outputs = self._model.generate(
-                **batch,
-                max_new_tokens=self._max_new_tokens,
-                use_cache=True,
-                do_sample=True,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                past_key_values_buckets=self.kv_caches,
-                ras_win_len=ras_win_len,
-                ras_win_max_num_repeat=ras_win_max_num_repeat,
-                stop_strings=["<|end_of_text|>", "<|eot_id|>"],
-                tokenizer=self._tokenizer,
-                seed=seed,
-            )
-
-
-            step_audio_out_ids_l = []
-            for ele in outputs[1]:
-                audio_out_ids = ele
-                if self._config.use_delay_pattern:
-                    audio_out_ids = revert_delay_pattern(audio_out_ids)
-                step_audio_out_ids_l.append(audio_out_ids.clip(0, self._audio_tokenizer.codebook_size - 1)[:, 1:-1])
-            audio_out_ids = torch.concat(step_audio_out_ids_l, dim=1)
-            audio_out_ids_l.append(audio_out_ids)
-            generated_audio_ids.append(audio_out_ids)
-
-            generation_messages.append(
-                Message(
-                    role="assistant",
-                    content=AudioContent(audio_url=""),
-                )
-            )
-            if generation_chunk_buffer_size is not None and len(generated_audio_ids) > generation_chunk_buffer_size:
-                generated_audio_ids = generated_audio_ids[-generation_chunk_buffer_size:]
-                generation_messages = generation_messages[(-2 * generation_chunk_buffer_size) :]
-
-        logger.info(f"========= Final Text output =========")
-        logger.info(self._tokenizer.decode(outputs[0][0]))
-        concat_audio_out_ids = torch.concat(audio_out_ids_l, dim=1)
-        concat_wv = self._audio_tokenizer.decode(concat_audio_out_ids.unsqueeze(0))[0, 0]
-        text_result = self._tokenizer.decode(outputs[0][0])
-        return concat_wv, sr, text_result
-
-
-def prepare_generation_context_with_reference_audio(ref_audio_path, audio_tokenizer, scene_prompt=None):
-    """Prepare the context for generation using a reference audio file path."""
-    system_message = None
-    messages = []
-    audio_ids = []
+def create_voice_cloning_sample(ref_audio_path: str, target_text: str) -> ChatMLSample:
+    """Create ChatMLSample for voice cloning using reference audio."""
+    reference_text = "This is the voice you should use for the generation."
+    reference_audio = encode_base64_content_from_file(ref_audio_path)
     
-    if ref_audio_path is not None:
-        # Encode the reference audio
-        audio_tokens = audio_tokenizer.encode(ref_audio_path)
-        audio_ids.append(audio_tokens)
-        
-        # Create system message without audio prompt in system message
-        if scene_prompt:
-            system_message = Message(
-                role="system",
-                content=f"Generate audio following instruction.\n\n<|scene_desc_start|>\n{scene_prompt}\n<|scene_desc_end|>",
-            )
-        else:
-            system_message = Message(
-                role="system",
-                content="Generate audio following instruction.",
-            )
-        
-        # Add user/assistant pair for voice cloning
-        ref_text = "This is the voice you should use for the generation."
-        messages.append(
-            Message(
-                role="user",
-                content=ref_text,
-            )
-        )
-        messages.append(
-            Message(
-                role="assistant",
-                content=AudioContent(
-                    audio_url=ref_audio_path,
-                ),
-            )
-        )
-    else:
-        # No reference audio, use default system message
-        system_message_l = ["Generate audio following instruction."]
-        if scene_prompt:
-            system_message_l.append(f"<|scene_desc_start|>\n{scene_prompt}\n<|scene_desc_end|>")
-        system_message = Message(
-            role="system",
-            content="\n\n".join(system_message_l),
-        )
-    
-    if system_message:
-        messages.insert(0, system_message)
-    return messages, audio_ids
+    messages = [
+        Message(role="user", content=reference_text),
+        Message(role="assistant", content=AudioContent(raw_audio=reference_audio, audio_url="placeholder")),
+        Message(role="user", content=target_text),
+    ]
+    return ChatMLSample(messages=messages)
 
 
-# Global variables for model initialization
-AUDIO_TOKENIZER = None
-MODEL_CLIENT = None
+def create_text_to_speech_sample(text: str) -> ChatMLSample:
+    """Create ChatMLSample for basic text-to-speech without voice cloning."""
+    messages = [
+        Message(role="system", content="Generate audio following instruction."),
+        Message(role="user", content=text),
+    ]
+    return ChatMLSample(messages=messages)
+
+
+# Global variable for serve engine
+SERVE_ENGINE = None
 
 def initialize_higgs_model():
-    """Initialize the Higgs model and tokenizer globally."""
-    global AUDIO_TOKENIZER, MODEL_CLIENT
+    """Initialize the Higgs serve engine globally."""
+    global SERVE_ENGINE
     
-    logger.info("Loading Higgs audio tokenizer...")
+    logger.info("Loading Higgs serve engine...")
     
     # Set device
-    device_id = None
-    if torch.cuda.is_available():
-        device_id = 0
-        device = "cuda:0"
-    else:
-        device_id = None
-        device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
     
-    # Load audio tokenizer
-    AUDIO_TOKENIZER = load_higgs_audio_tokenizer("bosonai/higgs-audio-v2-tokenizer", device=device)
-    
-    logger.info("Loading Higgs model...")
-    
-    # Initialize model client
-    MODEL_CLIENT = HiggsAudioModelClient(
-        model_path="bosonai/higgs-audio-v2-generation-3B-base",
-        audio_tokenizer=AUDIO_TOKENIZER,
-        device_id=device_id,
-        max_new_tokens=2048,
-        use_static_kv_cache=True,
+    # Initialize serve engine
+    SERVE_ENGINE = HiggsAudioServeEngine(
+        MODEL_PATH,
+        AUDIO_TOKENIZER_PATH,
+        device=device,
     )
     
-    logger.info("Higgs model successfully loaded and ready for inference!")
+    logger.info("Higgs serve engine successfully loaded and ready for inference!")
 
 
 def generate_audio(
@@ -472,7 +144,7 @@ def generate_audio(
     unconditional_keys,  # Ignored parameter
 ):
     """Core function for generating audio using Higgs TTS - must match Zonos API exactly."""
-    global MODEL_CLIENT, AUDIO_TOKENIZER
+    global SERVE_ENGINE
     
     logger.info(f"Processing TTS request for text: {text}")
     
@@ -521,40 +193,33 @@ def generate_audio(
     if not any([processed_text.endswith(c) for c in [".", "!", "?", ",", ";", '"', "'", "</SE_e>", "</SE>"]]):
         processed_text += "."
     
-    # Prepare generation context
-    messages, audio_ids = prepare_generation_context_with_reference_audio(
-        ref_audio_path=ref_audio_path,
-        audio_tokenizer=AUDIO_TOKENIZER,
-        scene_prompt=None,
-    )
-    
-    # Prepare text chunks
-    chunked_text = prepare_chunk_text(
-        processed_text,
-        chunk_method=None,  # No chunking for simplicity
-        chunk_max_word_num=200,
-        chunk_max_num_turns=1,
-    )
-    
-    logger.info("Chunks used for generation:")
-    for idx, chunk_text in enumerate(chunked_text):
-        logger.info(f"Chunk {idx}: {chunk_text}")
-    
-    # Generate audio using Higgs model
+    # Create ChatMLSample for generation
     try:
+        if ref_audio_path:
+            # Voice cloning mode
+            logger.info(f"Creating voice cloning sample with reference audio: {ref_audio_path}")
+            chat_sample = create_voice_cloning_sample(ref_audio_path, processed_text)
+        else:
+            # Regular text-to-speech mode
+            logger.info("Creating text-to-speech sample (no voice cloning)")
+            chat_sample = create_text_to_speech_sample(processed_text)
+        
+        # Generate audio using serve engine
+        logger.info("Starting audio generation...")
         start = time.time()
-        concat_wv, sr, text_output = MODEL_CLIENT.generate(
-            messages=messages,
-            audio_ids=audio_ids,
-            chunked_text=chunked_text,
-            generation_chunk_buffer_size=None,
+        
+        response: HiggsAudioResponse = SERVE_ENGINE.generate(
+            chat_ml_sample=chat_sample,
+            max_new_tokens=2048,
             temperature=1.0,
             top_k=50,
             top_p=top_p if top_p > 0 else 0.95,
             ras_win_len=7,
             ras_win_max_num_repeat=2,
-            seed=int(seed) if seed else 123,
+            seed=int(seed) if seed else None,
+            stop_strings=["<|end_of_text|>", "<|eot_id|>"],
         )
+        
         end = time.time()
         elapsed_ms = (end - start) * 1000
         logger.info(f"Audio generation completed in {elapsed_ms:.2f} ms")
@@ -565,8 +230,9 @@ def generate_audio(
         temp_file.close()
         
         # Write audio to temporary file
-        sf.write(temp_path, concat_wv, sr)
+        sf.write(temp_path, response.audio, response.sampling_rate)
         logger.info(f"Audio saved to temporary file: {temp_path}")
+        logger.info(f"Generated text: {response.generated_text}")
         
         # Return the file path (not the audio data) for Gradio/Zonos compatibility
         return temp_path
