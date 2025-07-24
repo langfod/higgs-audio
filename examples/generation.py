@@ -24,7 +24,7 @@ from boson_multimodal.dataset.chatml_dataset import (
 )
 from boson_multimodal.model.higgs_audio.utils import revert_delay_pattern
 from typing import List
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import StaticCache
 from typing import Optional
 from dataclasses import asdict
@@ -32,6 +32,12 @@ import torch
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 
+BNB_CONF = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16
+)
 
 AUDIO_PLACEHOLDER_TOKEN = "<|__AUDIO_PLACEHOLDER__|>"
 
@@ -196,6 +202,7 @@ class HiggsAudioModelClient:
         )
         self._model = HiggsAudioModel.from_pretrained(
             model_path,
+            quantization_config=BNB_CONF,
             device_map=self._device,
             torch_dtype=torch.bfloat16,
         )

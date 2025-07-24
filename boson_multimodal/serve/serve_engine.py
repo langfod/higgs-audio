@@ -6,7 +6,7 @@ from io import BytesIO
 from dataclasses import dataclass
 from typing import List, Optional, Union
 from copy import deepcopy
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoTokenizer, AutoProcessor, BitsAndBytesConfig
 from transformers.cache_utils import StaticCache
 from transformers.generation.streamers import BaseStreamer
 from transformers.generation.stopping_criteria import StoppingCriteria
@@ -22,6 +22,13 @@ from ..model.higgs_audio.utils import revert_delay_pattern
 from ..data_collator.higgs_audio_collator import HiggsAudioSampleCollator
 from ..audio_processing.higgs_audio_tokenizer import load_higgs_audio_tokenizer
 
+
+BNB_CONF = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16
+)
 
 @dataclass
 class HiggsAudioStreamerDelta:
@@ -184,6 +191,7 @@ class HiggsAudioServeEngine:
         device: str = "cuda",
         torch_dtype: Union[torch.dtype, str] = "auto",
         kv_cache_lengths: List[int] = [1024, 4096, 8192],  # Multiple KV cache sizes
+        quantization = True,
     ):
         """
         Initialize the HiggsAudioServeEngine, a serving wrapper for the HiggsAudioModel.
@@ -208,7 +216,10 @@ class HiggsAudioServeEngine:
         self.torch_dtype = torch_dtype
 
         # Initialize model and tokenizer
-        self.model = HiggsAudioModel.from_pretrained(model_name_or_path, torch_dtype=torch_dtype).to(device)
+        if quantization:
+            self.model = HiggsAudioModel.from_pretrained(model_name_or_path, quantization_config=BNB_CONF, torch_dtype=torch_dtype).to(device)
+        else:
+            self.model = HiggsAudioModel.from_pretrained(model_name_or_path, torch_dtype=torch_dtype).to(device)
         logger.info(f"Loaded model from {model_name_or_path}, dtype: {self.model.dtype}")
 
         if tokenizer_name_or_path is None:

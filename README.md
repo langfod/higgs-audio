@@ -1,3 +1,79 @@
+<h1 align="center">Add quantization（4bit）and fix bugs in higher version <i>transformer</i></h1>
+
+The enviroment of my computer: 
+```bash
+CPU	                    13th Gen Intel(R) Core(TM) i5-13600K   3.50 GHz
+RAM	                    16.0 GB 
+Windows 11              23H2
+GPU                     NVIDIA GeForce RTX 4060
+NVIDIA-SMI              561.09 
+CUDA Version            12.6
+Python                  3.10.10
+torch                   2.4.1+cu124
+transformers            4.45.1
+```
+and the program ran in my windows' powershell.
+
+To successfully run these samples in **README** on my computer, I made the following modifications:
+
+1. Add the requirement of package **_bitsandbytes_**
+	
+2. Change the code of  **_examples\generation.py_** , **_\boson_multimodal\serve\serve_engine.py_** and **_boson_multimodal\model\higgs_audio\modeling_higgs_audio.py_**
+
+In **_examples\generation.py_**
+```python
+...
+from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
+...
+BNB_CONF = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16
+)
+...
+        self._model = HiggsAudioModel.from_pretrained(
+            model_path,
+            quantization_config=BNB_CONF,
+            device_map=self._device,
+            torch_dtype=torch.bfloat16,
+        )
+...
+```
+
+In **_\boson_multimodal\serve\serve_engine.py_**
+```python
+from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
+...
+BNB_CONF = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16
+)
+...
+class HiggsAudioServeEngine:
+    def __init__(
+        self,
+        model_name_or_path: str,
+        audio_tokenizer_name_or_path: str,
+        tokenizer_name_or_path: Optional[str] = None,
+        device: str = "cuda",
+        torch_dtype: Union[torch.dtype, str] = "auto",
+        kv_cache_lengths: List[int] = [1024, 4096, 8192],  # Multiple KV cache sizes
+        quantization = True,
+    ):
+...
+        if quantization:
+            self.model = HiggsAudioModel.from_pretrained(model_name_or_path, quantization_config=BNB_CONF, torch_dtype=torch_dtype).to(device)
+        else:
+            self.model = HiggsAudioModel.from_pretrained(model_name_or_path, torch_dtype=torch_dtype).to(device)
+...
+```
+In **_boson_multimodal\model\higgs_audio\modeling_higgs_audio.py_**, I replace all _get_max_cache_shape_ into _get_max_length_.
+
+
+
 <h1 align="center">Higgs Audio V2: Redefining Expressiveness in Audio Generation</h1>
 
 <div align="center" style="display: flex; justify-content: center; margin-top: 10px;">
