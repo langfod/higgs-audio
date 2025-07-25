@@ -130,7 +130,7 @@ def generate_audio(
     fmax,  # Ignored parameter
     pitch_std,  # Ignored parameter
     speaking_rate,  # Ignored parameter
-    dnsmos_overall_slider,  # Ignored parameter
+    dnsmos_overall,  # Ignored parameter
     denoise_speaker,  # Ignored parameter
     cfg_scale,  # Ignored parameter
     top_p,  # Can be used for generation
