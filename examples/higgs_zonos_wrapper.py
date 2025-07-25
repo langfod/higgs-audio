@@ -247,37 +247,37 @@ logger.info("Initializing Higgs TTS model...")
 initialize_higgs_model()
 
 
-# Define Gradio interface inputs to match Zonos API exactly
+# Define Gradio interface inputs to match Zonos API exactly (29 parameters)
 api_inputs = [
-    gr.Textbox(label="Model"),  # model
-    gr.Textbox(label="Text"),  # text
-    gr.Textbox(label="Language"),  # language
-    gr.File(label="Speaker Audio"),  # speaker_audio
-    gr.File(label="Prefix Audio"),  # prefix_audio
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Happiness"),  # response_tone_happiness
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Sadness"),  # response_tone_sadness
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Disgust"),  # response_tone_disgust
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Fear"),  # response_tone_fear
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Surprise"),  # response_tone_surprise
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Anger"),  # response_tone_anger
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Other"),  # response_tone_other
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Neutral"),  # response_tone_neutral
-    gr.Slider(minimum=0.5, maximum=0.8, value=0.7, label="VQ Score"),  # vq_score
-    gr.Slider(minimum=22050, maximum=24000, value=24000, label="Fmax (Hz)"),  # fmax
-    gr.Slider(minimum=20, maximum=150, value=45, label="Pitch Std"),  # pitch_std
-    gr.Slider(minimum=0, maximum=45, value=14.6, label="Speaking Rate"),  # speaking_rate
-    gr.Slider(minimum=1, maximum=5, value=4, label="DNSMOS Overall"),  # dnsmos_overall_slider
-    gr.Checkbox(label="Denoise Speaker"),  # denoise_speaker
-    gr.Slider(minimum=1, maximum=10, value=3, label="CFG Scale"),  # cfg_scale
-    gr.Slider(minimum=0.1, maximum=1.0, value=0.95, label="Top P"),  # top_p
-    gr.Slider(minimum=1, maximum=100, value=5, label="Min K"),  # min_k
-    gr.Slider(minimum=0.01, maximum=1.0, value=0.05, label="Min P"),  # min_p
-    gr.Slider(minimum=0, maximum=1, value=0.5, label="Linear"),  # linear
-    gr.Slider(minimum=0, maximum=1, value=0.7, label="Confidence"),  # confidence
-    gr.Slider(minimum=0, maximum=1, value=0.3, label="Quadratic"),  # quadratic
-    gr.Number(value=123, label="Seed"),  # seed
-    gr.Checkbox(label="Randomize Seed"),  # randomize_seed
-    gr.Textbox(label="Unconditional Keys"),  # unconditional_keys
+    gr.Textbox(label="Model"),  # 0: model
+    gr.Textbox(label="Text"),  # 1: text
+    gr.Textbox(label="Language"),  # 2: language ("en-us")
+    gr.File(label="Speaker Audio"),  # 3: speaker_audio (reference audio file)
+    gr.File(label="Prefix Audio"),  # 4: prefix_audio (None)
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Happiness"),  # 5: response_tone_happiness
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Sadness"),  # 6: response_tone_sadness
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Disgust"),  # 7: response_tone_disgust
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Fear"),  # 8: response_tone_fear
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Surprise"),  # 9: response_tone_surprise
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Anger"),  # 10: response_tone_anger
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Other"),  # 11: response_tone_other
+    gr.Slider(minimum=0, maximum=1, value=0.2, label="Neutral"),  # 12: response_tone_neutral
+    gr.Slider(minimum=0.5, maximum=1.0, value=0.7, label="VQ Score"),  # 13: vq_score
+    gr.Slider(minimum=20000, maximum=25000, value=24000, label="Fmax (Hz)"),  # 14: fmax
+    gr.Slider(minimum=20, maximum=150, value=45, label="Pitch Std"),  # 15: pitch_std
+    gr.Slider(minimum=0, maximum=50, value=14.6, label="Speaking Rate"),  # 16: speaking_rate
+    gr.Slider(minimum=1, maximum=5, value=4, label="DNSMOS Overall"),  # 17: dnsmos_overall
+    gr.Checkbox(value=True, label="Denoise Speaker"),  # 18: denoise_speaker
+    gr.Slider(minimum=1, maximum=10, value=3, label="CFG Scale"),  # 19: cfg_scale
+    gr.Slider(minimum=0.1, maximum=1.0, value=0.9, label="Top P"),  # 20: top_p
+    gr.Slider(minimum=1, maximum=100, value=1, label="Min K"),  # 21: min_k
+    gr.Slider(minimum=0.01, maximum=1.0, value=0.2, label="Min P"),  # 22: min_p
+    gr.Checkbox(value=False, label="Linear"),  # 23: linear
+    gr.Slider(minimum=0, maximum=1, value=0.7, label="Confidence"),  # 24: confidence
+    gr.Checkbox(value=False, label="Quadratic"),  # 25: quadratic
+    gr.Number(value=123, label="Seed"),  # 26: seed
+    gr.Checkbox(value=False, label="Randomize Seed"),  # 27: randomize_seed
+    gr.Textbox(value="[]", label="Unconditional Keys"),  # 28: unconditional_keys (empty list)
 ]
 
 # Create Gradio interface with queue enabled (CRITICAL for Zonos compatibility)
@@ -287,6 +287,7 @@ app = gr.Interface(
     outputs=gr.Audio(label="Generated Audio"),
     title="Higgs TTS Zonos-Compatible Wrapper",
     description="Higgs TTS model wrapper that provides Zonos TTS API compatibility for seamless client integration.",
+    api_name="generate_audio"  # Explicitly set API name for Zonos compatibility
 ).queue()
 
 if __name__ == "__main__":
