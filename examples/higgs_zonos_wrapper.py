@@ -10,15 +10,20 @@ import langid
 import jieba
 import re
 import time
+import hashlib
+import requests
+import json
 
 from loguru import logger
 from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine, HiggsAudioResponse
 from boson_multimodal.data_types import Message, ChatMLSample, AudioContent, TextContent
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+TRANSCRIPTION_CACHE_DIR = os.path.join(CURR_DIR, "transcription_cache")
 
 MODEL_PATH = "bosonai/higgs-audio-v2-generation-3B-base"
 AUDIO_TOKENIZER_PATH = "bosonai/higgs-audio-v2-tokenizer"
+WHISPER_API_URL = "http://localhost:8080/inference"
 
 
 def normalize_chinese_punctuation(text):
@@ -67,9 +72,85 @@ def encode_base64_content_from_file(file_path: str) -> str:
     return audio_base64
 
 
+def get_audio_file_md5(file_path: str) -> str:
+    """Get MD5 hash of audio file for caching."""
+    with open(file_path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def get_cached_transcription(audio_md5: str) -> str:
+    """Get cached transcription if it exists."""
+    cache_file = os.path.join(TRANSCRIPTION_CACHE_DIR, f"{audio_md5}.txt")
+    if os.path.exists(cache_file):
+        with open(cache_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return None
+
+
+def save_transcription_to_cache(audio_md5: str, transcription: str) -> None:
+    """Save transcription to cache."""
+    os.makedirs(TRANSCRIPTION_CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(TRANSCRIPTION_CACHE_DIR, f"{audio_md5}.txt")
+    with open(cache_file, "w", encoding="utf-8") as f:
+        f.write(transcription)
+
+
+def transcribe_audio_with_whisper(audio_path: str) -> str:
+    """Transcribe audio using local whispercpp server with caching."""
+    # Get MD5 hash for caching
+    audio_md5 = get_audio_file_md5(audio_path)
+    logger.info(f"Audio file MD5: {audio_md5}")
+    
+    # Check cache first
+    cached_transcription = get_cached_transcription(audio_md5)
+    if cached_transcription:
+        logger.info(f"Using cached transcription for {audio_md5}")
+        return cached_transcription
+    
+    # Transcribe using whispercpp server
+    logger.info(f"Transcribing audio file: {audio_path}")
+    start_time = time.time()
+    
+    try:
+        payload = {
+            "temperature": 0,
+            "response_format": "json"
+        }
+        
+        with open(audio_path, "rb") as f:
+            files = {
+                "file": (os.path.basename(audio_path), f, "audio/wav")
+            }
+            response = requests.post(WHISPER_API_URL, files=files, data=payload, timeout=60)
+            response.raise_for_status()
+        
+        # Handle JSON response
+        if response.headers.get("Content-Type", "").startswith("application/json"):
+            transcription = response.json().get("text", "").strip()
+        else:
+            transcription = response.text.strip()
+        
+        end_time = time.time()
+        elapsed_ms = (end_time - start_time) * 1000
+        logger.info(f"Transcription completed in {elapsed_ms:.2f}ms: '{transcription}'")
+        
+        # Save to cache
+        if transcription:
+            save_transcription_to_cache(audio_md5, transcription)
+            logger.info(f"Saved transcription to cache: {audio_md5}")
+        
+        return transcription
+        
+    except Exception as e:
+        logger.error(f"Failed to transcribe audio: {str(e)}")
+        # Fallback to a generic message if transcription fails
+        return "This is the voice you should use for the generation."
+
+
 def create_voice_cloning_sample(ref_audio_path: str, target_text: str) -> ChatMLSample:
     """Create ChatMLSample for voice cloning using reference audio."""
-    reference_text = "This is the voice you should use for the generation."
+    # Transcribe the reference audio to get the actual spoken text
+    reference_text = transcribe_audio_with_whisper(ref_audio_path)
     reference_audio = encode_base64_content_from_file(ref_audio_path)
     
     messages = [
@@ -197,7 +278,7 @@ def generate_audio(
     try:
         if ref_audio_path:
             # Voice cloning mode
-            logger.info(f"Creating voice cloning sample with reference audio: {ref_audio_path}")
+            logger.info(f"Creating voice cloning sample with reference audio: {ref_audio_path} and text: {processed_text}")
             chat_sample = create_voice_cloning_sample(ref_audio_path, processed_text)
         else:
             # Regular text-to-speech mode
