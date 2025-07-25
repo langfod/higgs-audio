@@ -211,7 +211,7 @@ def generate_audio(
         response: HiggsAudioResponse = SERVE_ENGINE.generate(
             chat_ml_sample=chat_sample,
             max_new_tokens=2048,
-            temperature=1.0,
+            temperature=0.3,
             top_k=50,
             top_p=top_p if top_p > 0 else 0.95,
             ras_win_len=7,
