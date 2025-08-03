@@ -197,3 +197,7 @@ result/
 
 # Ruff
 .ruff_cache/
+/.idea
+/assets
+/examples/transcription_cache
+/transcription_cache

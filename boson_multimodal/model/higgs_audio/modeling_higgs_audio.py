@@ -1228,9 +1228,9 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
         if self.config.skip_audio_tower:
             audio_features_embed = audio_features_length = None
         else:
-            audio_features_embed, audio_features_length = self._apply_audio_tower(
-                audio_features, audio_feature_attention_mask
-            )
+          audio_features_embed, audio_features_length = self._apply_audio_tower(
+            audio_features, audio_feature_attention_mask
+          )
 
         if self.config.encode_audio_in_tokens:
             if audio_in_ids is not None and audio_in_ids.shape[-1] > 0:

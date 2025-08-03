@@ -294,6 +294,8 @@ class HiggsAudioTokenizer(nn.Module):
         return EncodedResult(codes)
 
     def decode(self, vq_code: torch.Tensor) -> torch.Tensor:
+        vq_code = vq_code.to(self.device)
+
         if self.quantizer_type == "RVQ":
             vq_code = vq_code.permute(1, 0, 2)
             quantized = self.quantizer.decode(vq_code)
