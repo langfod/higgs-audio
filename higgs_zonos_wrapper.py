@@ -1,30 +1,26 @@
 """Higgs TTS Gradio Wrapper for Zonos Client Compatibility."""
-
-import tempfile
+import asyncio
 from pathlib import Path
 from typing import Optional
 
 import torch
 import gradio as gr
-import soundfile as sf
 import time
 import sys
 
 from loguru import logger
 
-from utilities.model_higgs_utils_ import initialize_higgs_model, create_voice_cloning_chatmlsample, \
-    create_text_to_speech_chatmlsample, higgs_generate
+from utilities.model_higgs_utils_ import initialize_higgs_model, create_voice_cloning_chatmlsample, create_text_to_speech_chatmlsample
+from utilities.token_cache import enable_token_cache, get_cache_stats
 from utilities.model_whisper_utils import initialize_whisper_model, transcribe_audio_with_whisper
 from utilities.text_utils import pre_process_text
+from utilities.file_utils import get_file_hash
 
 current_dir = Path.cwd()
 sys.path.append(str(current_dir.resolve()))
 
-from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine, HiggsAudioResponse
+from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine
 from faster_whisper import WhisperModel
-
-
-
 
 WHISPER_ENGINE: Optional[WhisperModel]= None
 HIGGS_ENGINE: Optional[HiggsAudioServeEngine] =None
@@ -67,8 +63,7 @@ def generate_audio(
 ):
     """Core function for generating audio using Higgs TTS - must match Zonos API exactly."""
 
-    logger.info(f"Processing TTS request for text: {text}")
-    
+
     # Input validation
     if not text or not text.strip():
         logger.error("Empty text provided")
@@ -86,8 +81,15 @@ def generate_audio(
         if ref_audio_path:
             # Voice cloning mode
             logger.info(f"Creating voice cloning sample with reference audio: {ref_audio_path} and text: {processed_text}")
-            reference_text = transcribe_audio_with_whisper(ref_audio_path)
-            chat_sample = create_voice_cloning_chatmlsample(ref_audio_path=ref_audio_path, ref_text=reference_text,target_text=processed_text)
+            ref_audio_hash = get_file_hash(ref_audio_path)
+            reference_text = transcribe_audio_with_whisper(ref_audio_path, ref_audio_hash)
+
+            chat_sample = create_voice_cloning_chatmlsample(
+                ref_audio_path=ref_audio_path,
+                ref_text=reference_text,
+                target_text=processed_text,
+                ref_audio_hash=ref_audio_hash
+            )
         else:
             # Regular text-to-speech mode
             logger.info("Creating text-to-speech sample (no voice cloning)")
@@ -109,7 +111,7 @@ def generate_audio(
         #    stop_strings=["<|eot_id|>", "<|end_of_text|>", "<|audio_eos|>"],
         #)
 
-        higgs_wav_out, higgs_sr = higgs_generate(
+        higgs_wav_out, higgs_sr = HIGGS_ENGINE.generate_audio_only(
             chat_ml_sample=chat_sample,
             max_new_tokens=2048,
             temperature=0.3,
@@ -123,30 +125,33 @@ def generate_audio(
         end = time.time()
         elapsed_ms = (end - start) * 1000
         logger.info(f"Audio generation completed in {elapsed_ms:.2f} ms")
-        
-        # Create temporary WAV file - CRITICAL: use delete=False
-        #temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        #temp_path = temp_file.name
-        #temp_file.close()
-        
-        # Write audio to temporary file
-        #sf.write(temp_path, higgs_audio_response.audio, higgs_audio_response.sampling_rate)
-        #logger.info(f"Audio saved to temporary file: {temp_path}")
-        #logger.info(f"Generated text: {higgs_audio_response.generated_text}")
-        
-        # Return the file path (not the audio data) for Gradio/Zonos compatibility
-        #return temp_path
-        #return (higgs_audio_response.sampling_rate, higgs_audio_response.audio), seed
+
+        stats = get_cache_stats()
+        print(f"📊 Cache Statistics:")
+        print(f"  Memory cache enabled: {stats['memory_cache_enabled']}")
+        print(f"  Disk cache enabled: {stats['disk_cache_enabled']}")
+        print(f"  Memory token cache: {stats['memory_token_cache_size']} items")
+        print(f"  Disk token cache: {stats['disk_token_cache_size']} files")
+        print(f"  Total cached items: {stats['total_cached_items']}")
+        if stats['memory_token_cache_keys']:
+            print(f"  Token cache keys: {stats['memory_token_cache_keys'][:3]}...")  # Show first 3 keys
+
         return (higgs_sr, higgs_wav_out), seed
+
     except Exception as e:
         logger.error(f"Error during audio generation: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
         return None
 
+async def initialize():
+    enable_token_cache(memory_cache=True, disk_cache=False)
+    higgs_engine, whisper_engine = await asyncio.gather(initialize_higgs_model(quantization=True), initialize_whisper_model())
+    return higgs_engine, whisper_engine
 
 # Initialize the model when the module is loaded
 logger.info("Initializing Higgs TTS model...")
-HIGGS_ENGINE = initialize_higgs_model(quantization=True)
-WHISPER_ENGINE = initialize_whisper_model()
+HIGGS_ENGINE, WHISPER_ENGINE = asyncio.run(initialize())
 
 # Define Gradio interface inputs to match Zonos API exactly (29 parameters)
 api_inputs = [

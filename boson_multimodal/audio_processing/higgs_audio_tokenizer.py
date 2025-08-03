@@ -258,6 +258,7 @@ class HiggsAudioTokenizer(nn.Module):
         with torch.no_grad():
             encoder_outputs = self._xcodec_encode(input_values)
             vq_code = encoder_outputs.audio_codes[0]
+            vq_code = vq_code.to(self.device)
         return vq_code
 
     def _xcodec_encode(self, x: torch.Tensor, target_bw: Optional[int] = None) -> torch.Tensor:
@@ -308,6 +309,37 @@ class HiggsAudioTokenizer(nn.Module):
         o = self.decoder_2(quantized_acoustic)
         return o.cpu().numpy()
 
+    def decode_int16(self, vq_code: torch.Tensor) -> torch.Tensor:
+        """Decode VQ codes directly to int16 format for efficient audio output.
+
+        This method returns GPU tensors for efficient concatenation with torch.cat().
+        Call .cpu().numpy() on the final result when numpy output is needed.
+
+        Args:
+            vq_code: VQ codes tensor to decode
+
+        Returns:
+            int16 tensor on GPU, ready for efficient concatenation
+        """
+        vq_code = vq_code.to(self.device)
+
+        if self.quantizer_type == "RVQ":
+            vq_code = vq_code.permute(1, 0, 2)
+            quantized = self.quantizer.decode(vq_code)
+            quantized = quantized.transpose(1, 2)
+        else:
+            vq_code = vq_code.permute(0, 2, 1)
+            quantized = self.quantizer.get_output_from_indices(vq_code)
+        quantized_acoustic = self.fc_post2(quantized).transpose(1, 2)
+
+        o = self.decoder_2(quantized_acoustic)
+
+        # Convert to int16 on GPU for efficient concatenation
+        # Clamp to [-1, 1] range and scale to int16 range
+        o_clamped = torch.clamp(o, -1.0, 1.0)
+        o_int16 = (o_clamped * 32767.0).to(torch.int16)
+
+        return o_int16
 
 def load_higgs_audio_tokenizer(tokenizer_name_or_path, device="cuda"):
     is_local = os.path.exists(tokenizer_name_or_path)
