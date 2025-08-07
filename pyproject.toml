@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 dependencies = [
-    "transformers==4.49.0"
+    "transformers==4.54.1"
 ]
 
 [tool.ruff]

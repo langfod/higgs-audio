@@ -1,10 +1,11 @@
 from pathlib import Path
 from typing import Optional
-
+import numpy as np
 import torch
 import time
 import sys
-
+import traceback
+import pandas as pd
 from loguru import logger
 
 current_dir = Path.cwd()
@@ -96,7 +97,7 @@ def generate_audio(
         logger.info(f"Audio generation completed in {elapsed_ms:.2f} ms")
 
         stats = get_cache_stats()
-        print(f"📊 Cache Statistics:")
+        print(f"Cache Statistics:")
         print(f"  Memory cache enabled: {stats['memory_cache_enabled']}")
         print(f"  Disk cache enabled: {stats['disk_cache_enabled']}")
         print(f"  Memory token cache: {stats['memory_token_cache_size']} items")
@@ -109,7 +110,6 @@ def generate_audio(
 
     except Exception as e:
         logger.error(f"Error during audio generation: {str(e)}")
-        import traceback
         print(traceback.format_exc())
         return None
 
@@ -120,7 +120,6 @@ logger.info("Initializing Higgs TTS model...")
 try:
     HIGGS_ENGINE = initialize_higgs_model(quantization=True)
 except Exception as e:
-    import traceback
     print(traceback.format_exc())
     logger.error(f"Failed to load Higgs model: {str(e)}")
 if HIGGS_ENGINE is None:
@@ -132,7 +131,23 @@ if WHISPER_ENGINE is None:
     sys.exit(1)
 
 logger.info("Running generate_audio function...")
+sampling_rate, wav_numpy, seed_int = 0, None, 0
+expected_wav_numpy = np.load('test_generate_audio_output.npy')
 try:
-    [sampling_rate, wav_numpy, seed_int] = generate_audio(text="Testing Text.",speaker_audio="assets\\dlc1seranavoice.wav")
+    
+    [sampling_rate, wav_numpy], seed_int = generate_audio(text="Testing Text.",speaker_audio="assets\\dlc1seranavoice.wav",seed=42)
+    print(f"Generated audio with sampling rate: {sampling_rate}, seed: {seed_int}")
+
+    #df_describe = pd.DataFrame(wav_numpy)
+    #print(df_describe.describe())
+    #if np.array_equal(wav_numpy, expected_wav_numpy):
+    #    print("Verification successful: Generated wav matches expected_wav_numpy.")
+    #else:
+    #    print("Warning: Generated wav does not match expected_wav_numpy.")
+    #if sampling_rate != 24000:
+    #    print(f"Warning: Expected sampling rate of 24000, but got {sampling_rate}")
+    #if seed_int != 42:
+    #    print(f"Warning: Expected seed of 42, but got {seed_int}")
 except Exception as e:
-        sys.exit(1)
+    print(traceback.format_exc())
+    sys.exit(1)

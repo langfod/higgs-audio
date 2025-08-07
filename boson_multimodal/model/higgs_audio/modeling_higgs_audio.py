@@ -1747,7 +1747,7 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
                     num_remaining_delays = self.audio_num_codebooks - last_eos_idx - 1
 
         while self._has_unfinished_sequences(
-            this_peer_finished, synced_gpus, device=input_ids.device, cur_len=cur_len, max_length=max_length
+            this_peer_finished, synced_gpus, device=input_ids.device
         ):
             # Check which multimodal stage we are in
             # FIXME: Assume single input generation
@@ -1973,7 +1973,12 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
         assert input_ids.shape[0] == 1, (
             "Currently HiggsAudioModel.generate() only supports batch_size=1. See the implementation of "
         )
+
         generation_config, kwargs = self._prepare_generation_config(kwargs.pop("generation_config", None), **kwargs)
+        # Ensure generation_kwargs exists for compatibility with Transformers 4.53.3
+        if not hasattr(generation_config, "generation_kwargs") or generation_config.generation_kwargs is None:
+            generation_config.generation_kwargs = {}
+
         if audio_out_bos_token_id is not None:
             generation_config.generation_kwargs["audio_out_bos_token_id"] = audio_out_bos_token_id
         else:

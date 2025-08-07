@@ -10,14 +10,14 @@ NVIDIA-SMI              561.09
 CUDA Version            12.6
 Python                  3.10.10
 torch                   2.4.1+cu124
-transformers            4.45.1
+transformers            4.50.3
 ```
 and the program ran in my windows' powershell.
 
 To successfully run these samples in **README** on my computer, I made the following modifications:
 
 1. Add the requirement of package **_bitsandbytes_**
-	
+    
 2. Change the code of  **_examples\generation.py_** , **_\boson_multimodal\serve\serve_engine.py_** and **_boson_multimodal\model\higgs_audio\modeling_higgs_audio.py_**
 
 In **_examples\generation.py_**
