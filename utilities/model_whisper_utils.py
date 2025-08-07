@@ -12,7 +12,7 @@ WHISPER_MODEL = "distil-whisper/distil-large-v3.5-ct2"
 
 WHISPER_ENGINE: Optional[WhisperModel]= None
 
-def initialize_whisper_model():
+async def initialize_whisper_model():
     global  WHISPER_ENGINE
 
     if WHISPER_ENGINE is None:

@@ -1,11 +1,11 @@
 ### Do NOT REMOVE THIS SECTION
---extra-index-url=https://download.pytorch.org/whl/cu128
-torch==2.7.1
-torchaudio==2.7.1
+--extra-index-url=https://download.pytorch.org/whl/cu129
+torch<2.9
+torchaudio
 
 #TRITON*************************************
 #https://github.com/woct0rdho/triton-windows/releases/download/empty/triton-3.3.0-py3-none-any.whl ; sys_platform == 'win32' #egg:3.3.0
-#triton-windows<3.5; sys_platform == 'win32' # tw
+triton-windows<3.5; sys_platform == 'win32' # tw
 
 #FLASH ATTENTION****************************
 #https://github.com/loscrossos/lib_flashattention/releases/download/v2.8.0/flash_attn-2.8.0+cu129torch2.7.1-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' #egg:v2.7.4.post1
@@ -28,7 +28,7 @@ pydantic
 vector_quantize_pytorch
 loguru
 pydub
-psutils
+psutil
 omegaconf
 click
 langid
@@ -36,7 +36,6 @@ jieba
 accelerate>=0.26.0
 bitsandbytes
 gradio
-gradio-client
 huggingface_hub[cli]
 huggingface_hub
 hf_xet

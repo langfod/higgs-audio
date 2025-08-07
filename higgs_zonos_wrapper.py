@@ -71,6 +71,7 @@ def generate_audio(
     processed_text = pre_process_text(text)
 
     # Get reference audio path from Gradio file object
+    print(f"Speaker audio: {speaker_audio}")
     ref_audio_path = None
     if speaker_audio is not None and hasattr(speaker_audio, 'name'):
         ref_audio_path = speaker_audio.name
@@ -150,9 +151,13 @@ async def initialize():
     return higgs_engine, whisper_engine
 
 # Initialize the model when the module is loaded
+enable_token_cache(memory_cache=True, disk_cache=True)
 logger.info("Initializing Higgs TTS model...")
 HIGGS_ENGINE, WHISPER_ENGINE = asyncio.run(initialize())
 
+
+#HIGGS_ENGINE = initialize_higgs_model(quantization=True)
+#WHISPER_ENGINE = initialize_whisper_model()
 # Define Gradio interface inputs to match Zonos API exactly (29 parameters)
 api_inputs = [
     gr.Textbox(label="Model"),  # 0: model

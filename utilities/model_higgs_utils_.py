@@ -12,8 +12,7 @@ AUDIO_TOKENIZER_PATH = "bosonai/higgs-audio-v2-tokenizer"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HIGGS_ENGINE: Optional[HiggsAudioServeEngine] =None
 
-# add , attn_implementation: str = "sdpa" later
-def initialize_higgs_model(quantization: bool = False) -> HiggsAudioServeEngine:
+async def initialize_higgs_model(quantization: bool = False) -> HiggsAudioServeEngine:
     global HIGGS_ENGINE
 
     if HIGGS_ENGINE is None:

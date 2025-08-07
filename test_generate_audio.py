@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Optional
 import numpy as np
@@ -116,18 +117,30 @@ def generate_audio(
 logger.info("Enabling token cache...")
 enable_token_cache(memory_cache=True, disk_cache=False)
 
-logger.info("Initializing Higgs TTS model...")
-try:
-    HIGGS_ENGINE = initialize_higgs_model(quantization=True)
-except Exception as e:
-    print(traceback.format_exc())
-    logger.error(f"Failed to load Higgs model: {str(e)}")
+async def initialize():
+    global HIGGS_ENGINE, WHISPER_ENGINE
+    try:
+        logger.info("Initializing Higgs TTS model...")
+        HIGGS_ENGINE = await initialize_higgs_model(quantization=True)
+    except Exception as e:
+        print(traceback.format_exc())
+        logger.error(f"Failed to load Higgs model: {str(e)}")
+        sys.exit(1)
+    try:
+        logger.info("Initializing Whisper model...")
+        WHISPER_ENGINE = await initialize_whisper_model()
+    except Exception as e:
+        print(traceback.format_exc())
+        logger.error(f"Failed to load Whisper model: {str(e)}")
+        sys.exit(1)
+
+asyncio.run(initialize())
 if HIGGS_ENGINE is None:
+    logger.error("Higgs TTS model initialization failed.")
     sys.exit(1)
 
-logger.info("Initializing Whisper model...")
-WHISPER_ENGINE = initialize_whisper_model()
 if WHISPER_ENGINE is None:
+    logger.error("Whisper model initialization failed.")
     sys.exit(1)
 
 logger.info("Running generate_audio function...")
