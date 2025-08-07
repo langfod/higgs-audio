@@ -202,3 +202,7 @@ result/
 /examples/transcription_cache
 /transcription_cache
 /cache
+/temp_scripts
+/.github/instructions
+memory.json
+/.vscode

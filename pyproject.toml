@@ -1,6 +1,12 @@
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[project]
+dependencies = [
+    "transformers==4.49.0"
+]
 
 [tool.ruff]
 line-length = 119

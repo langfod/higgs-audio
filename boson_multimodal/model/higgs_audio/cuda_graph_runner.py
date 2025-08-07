@@ -3,7 +3,7 @@ import torch.nn as nn
 from typing import Optional, List, Dict, Tuple, Union
 import gc
 
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, StaticCache
 
 
 _NUM_WARMUP_ITERS = 2

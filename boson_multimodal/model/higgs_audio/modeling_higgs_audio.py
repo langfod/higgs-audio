@@ -19,7 +19,6 @@ from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
-    LLAMA_ATTENTION_CLASSES,
     LlamaMLP,
     LlamaRMSNorm,
 )
@@ -27,7 +26,9 @@ from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin, GenerationConfig, LogitsProcessorList, StoppingCriteriaList
 from transformers.generation.utils import GenerateNonBeamOutput
+
 from transformers.utils import logging, ModelOutput
+from transformers.generation.streamers import BaseStreamer
 
 from .common import HiggsAudioPreTrainedModel
 from .utils import (
@@ -401,15 +402,17 @@ class HiggsAudioDualFFNDecoderLayer(nn.Module):
         text_config = config.text_config
         self.hidden_size = text_config.hidden_size
         self.layer_idx = layer_idx
-        self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=text_config, layer_idx=layer_idx)
+        # LLAMA_ATTENTION_CLASSES removed in transformers>=4.48.0; use LlamaAttention or custom mapping if needed
+        from transformers.models.llama.modeling_llama import LlamaAttention
+        self.self_attn = LlamaAttention(config=text_config, layer_idx=layer_idx)
 
         self.mlp = LlamaMLP(text_config)
 
         if not fast_forward:
             if use_audio_attention:
-                self.audio_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](
-                    config=text_config, layer_idx=layer_idx + 1
-                )
+                # LLAMA_ATTENTION_CLASSES removed; use LlamaAttention for audio_attn as well
+                from transformers.models.llama.modeling_llama import LlamaAttention
+                self.audio_attn = LlamaAttention(config=text_config, layer_idx=layer_idx + 1)
                 self.audio_post_audio_attn_layer_norm = LlamaRMSNorm(
                     text_config.hidden_size, eps=text_config.rms_norm_eps
                 )
@@ -627,7 +630,7 @@ class HiggsAudioDualFFNDecoderLayer(nn.Module):
 
             audio_attention_mask = audio_attention_mask.contiguous()
 
-            audio_hidden_states, audio_self_attn_weights, audio_present_key_value = self.audio_attn(
+            audio_hidden_states, audio_self_attn_weights = self.audio_attn(
                 hidden_states=hidden_states,
                 attention_mask=audio_attention_mask,
                 position_ids=position_ids,
@@ -654,7 +657,7 @@ class HiggsAudioDualFFNDecoderLayer(nn.Module):
                 hidden_states = torch.where(audio_out_mask_sq.unsqueeze(-1), audio_hidden_states, hidden_states)
 
         # Text Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -722,8 +725,8 @@ class HiggsAudioDualFFNDecoderLayer(nn.Module):
                 # The returned attn weights have shape (batch_size, num_heads, seq_length, seq_length)
                 outputs += (self_attn_weights,)
 
-        if use_cache:
-            outputs += (present_key_value,)
+        # present_key_value is no longer returned by attention modules in transformers 4.48.3
+        # If use_cache is needed, update to use new cache API or remove this output
 
         return outputs
 
@@ -1015,7 +1018,7 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
         if using_static_cache:
-            target_length = past_key_values.get_max_length()
+            target_length = past_key_values.max_cache_len
         else:
             target_length = (
                 attention_mask.shape[-1]
@@ -1053,7 +1056,7 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
         cur_pos = audio_out_mask.shape[1]
         min_dtype = torch.finfo(hidden_states.dtype).min
         assert len(attention_mask.shape) == 4, "Only support SDPA for now"
-        kv_cache_len = past_key_values.get_max_length()
+        kv_cache_len = past_key_values.max_cache_len
         audio_out_mask_padded = torch.nn.functional.pad(audio_out_mask, (0, kv_cache_len - cur_pos), value=True)
         fast_forward_attention_mask = attention_mask.masked_fill(
             audio_out_mask_padded[:, audio_out_mask.shape[1] - target_length : audio_out_mask.shape[1]].reshape(
@@ -1281,7 +1284,7 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
 
         # re-check if we use the correct kv cache bucket after
         # the input_embeds has been merged with audio features
-        if past_key_values_buckets is not None and inputs_embeds.shape[1] > past_key_values.get_max_length():
+        if past_key_values_buckets is not None and inputs_embeds.shape[1] > past_key_values.max_cache_len:
             past_key_values, self.current_past_key_values_bucket = self._prepare_kv_cache(
                 inputs_embeds.shape[1], None, past_key_values_buckets
             )
@@ -1294,7 +1297,7 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
             cache_position = torch.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
-            if isinstance(past_key_values, StaticCache) and past_seen_tokens >= past_key_values.get_max_length():
+            if isinstance(past_key_values, StaticCache) and past_seen_tokens >= past_key_values.max_cache_len:
                 raise ValueError(
                     f"The current sequence length ({past_seen_tokens}) exceeds "
                     f"the maximum cache shape. "
@@ -1334,10 +1337,16 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
         # if it exists, otherwise use the normal forward pass
         if (
             past_key_values is not None
-            and past_key_values.get_max_length() in self.decode_graph_runners
+            and (
+                (isinstance(past_key_values, StaticCache) and past_key_values.max_cache_len in self.decode_graph_runners)
+                or (not isinstance(past_key_values, StaticCache) and past_key_values.get_max_length() in self.decode_graph_runners)
+            )
             and (input_ids.shape[-1] == 1)
         ):
-            _forward_core = self.decode_graph_runners[past_key_values.get_max_length()][is_decoding_audio_token]
+            if isinstance(past_key_values, StaticCache):
+                _forward_core = self.decode_graph_runners[past_key_values.max_cache_len][is_decoding_audio_token]
+            else:
+                _forward_core = self.decode_graph_runners[past_key_values.get_max_length()][is_decoding_audio_token]
             is_using_cuda_graph = True
         else:
             _forward_core = self._forward_core
@@ -1457,9 +1466,16 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
             num_layers += len(self.config.audio_dual_ffn_layers)
         """ Copy the key-value pairs from one cache to another. """
         for layer_idx in range(num_layers):
-            from_cache_size = from_cache.get_max_length()
-            assert to_cache.get_max_length() >= from_cache_size, (
-                f"The target cache size {to_cache.get_max_length()} is smaller than the source cache size {from_cache_size}."
+            if isinstance(from_cache, StaticCache):
+                from_cache_size = from_cache.max_cache_len
+            else:
+                from_cache_size = from_cache.get_max_length()
+            if isinstance(to_cache, StaticCache):
+                to_cache_len = to_cache.max_cache_len
+            else:
+                to_cache_len = to_cache.get_max_length()
+            assert to_cache_len >= from_cache_size, (
+                f"The target cache size {to_cache_len} is smaller than the source cache size {from_cache_size}."
             )
             to_cache.key_cache[layer_idx][:, :, :from_cache_size, :] = from_cache.key_cache[layer_idx]
             to_cache.value_cache[layer_idx][:, :, :from_cache_size, :] = from_cache.value_cache[layer_idx]
@@ -2246,7 +2262,7 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
             past_key_values: List of KV caches to capture graphs for
         """
         for past_key_value in past_key_values:
-            kv_cache_length = past_key_value.get_max_length()
+            kv_cache_length = past_key_value.max_cache_len if isinstance(past_key_value, StaticCache) else past_key_value.get_max_length()
             # We capture two graphs, one for decoding audio tokens and one for decoding text tokens
             for is_decoding_audio_token in [True, False]:
                 runner = CUDAGraphRunner(self._forward_core)

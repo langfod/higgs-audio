@@ -12,23 +12,30 @@ AUDIO_TOKENIZER_PATH = "bosonai/higgs-audio-v2-tokenizer"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HIGGS_ENGINE: Optional[HiggsAudioServeEngine] =None
 
-async def initialize_higgs_model(quantization: bool = False) -> HiggsAudioServeEngine:
+# add , attn_implementation: str = "sdpa" later
+def initialize_higgs_model(quantization: bool = False) -> HiggsAudioServeEngine:
     global HIGGS_ENGINE
 
     if HIGGS_ENGINE is None:
-        logger.info("Loading Higgs serve engine...")
-        try:
-            HIGGS_ENGINE = HiggsAudioServeEngine(
-                MODEL_PATH,
-                AUDIO_TOKENIZER_PATH,
-                device=DEVICE,
-                quantization=quantization
-            )
-
-        except Exception as e:
-            import traceback
-            print(traceback.format_exc())
-            logger.error(f"Failed to load Higgs model: {str(e)}")
+        HIGGS_ENGINE = HiggsAudioServeEngine(
+            MODEL_PATH,
+            AUDIO_TOKENIZER_PATH,
+            device=DEVICE,
+            quantization=quantization,
+        )
+        #try:
+        #    HIGGS_ENGINE = HiggsAudioServeEngine(
+        #        MODEL_PATH,
+        #        AUDIO_TOKENIZER_PATH,
+        #        device=DEVICE,
+        #        quantization=quantization,
+        #        attn_implementation=attn_implementation
+        #    )
+#
+        #except Exception as e:
+        #    import traceback
+        #    print(traceback.format_exc())
+        #    logger.error(f"Failed to load Higgs model: {str(e)}")
     return HIGGS_ENGINE
 
 def create_voice_cloning_chatmlsample(ref_audio_path: str, ref_text: str, target_text: str, ref_audio_hash: str = None) -> ChatMLSample:
