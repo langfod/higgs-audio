@@ -10,6 +10,15 @@ import copy
 import torchaudio
 import tqdm
 import yaml
+import sys
+import time
+import json
+import warnings
+from pathlib import Path
+from collections import OrderedDict
+
+# Suppress cache-related deprecation warnings
+warnings.filterwarnings("ignore", message=".*batch_size.*attribute of.*Cache is deprecated.*")
 
 from loguru import logger
 from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine, HiggsAudioResponse
@@ -25,7 +34,7 @@ from boson_multimodal.dataset.chatml_dataset import (
 from boson_multimodal.model.higgs_audio.utils import revert_delay_pattern
 from typing import List
 from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
-from transformers.cache_utils import StaticCache
+from transformers.cache_utils import Cache, StaticCache, StaticLayer
 from typing import Optional
 from dataclasses import asdict
 import torch
@@ -237,7 +246,8 @@ class HiggsAudioModelClient:
             cache_config.num_hidden_layers += len(self._model.config.audio_dual_ffn_layers)
         # A list of KV caches for different lengths
         self.kv_caches = {
-            length: StaticCache(
+            length: Cache(
+                layer_classes=StaticLayer,
                 config=cache_config,
                 max_batch_size=1,
                 max_cache_len=length,
