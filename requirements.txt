@@ -38,12 +38,10 @@ accelerate>=0.26.0
 huggingface_hub[cli]
 huggingface_hub
 hf_xet
-gradio
+
 bitsandbytes
 gradio
-huggingface_hub[cli]
-huggingface_hub
-hf_xet
+
 fastapi
 starlette
 faster-whisper

@@ -145,7 +145,7 @@ if WHISPER_ENGINE is None:
 
 logger.info("Running generate_audio function...")
 sampling_rate, wav_numpy, seed_int = 0, None, 0
-expected_wav_numpy = np.load('test_generate_audio_output.npy')
+#expected_wav_numpy = np.load('test_generate_audio_output.npy')
 try:
     
     [sampling_rate, wav_numpy], seed_int = generate_audio(text="Testing Text.",speaker_audio="assets\\dlc1seranavoice.wav",seed=42)
