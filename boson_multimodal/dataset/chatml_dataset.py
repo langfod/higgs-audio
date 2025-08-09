@@ -145,7 +145,7 @@ class ChatMLDatasetSample:
             ChatMLDatasetSample: Merged and potentially padded sample.
         """
         if not samples:
-            logger.fatal("The samples list is empty and cannot be merged.")
+            logger.critical("The samples list is empty and cannot be merged.")
             raise ValueError("The samples list is empty and cannot be merged.")
 
         # Initialize empty lists for concatenation

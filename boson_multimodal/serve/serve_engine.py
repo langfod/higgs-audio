@@ -6,22 +6,30 @@ from io import BytesIO
 from dataclasses import dataclass
 from typing import List, Optional, Union
 from copy import deepcopy
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import StaticCache
 from transformers.generation.streamers import BaseStreamer
 from transformers.generation.stopping_criteria import StoppingCriteria
 from dataclasses import asdict
 from loguru import logger
 import threading
-import librosa
+import torchaudio
+from torchaudio.transforms import Resample
 
-
+from faster_whisper import WhisperModel
 from ..dataset.chatml_dataset import ChatMLSample, ChatMLDatasetSample, prepare_chatml_sample
 from ..model.higgs_audio import HiggsAudioModel
 from ..model.higgs_audio.utils import revert_delay_pattern
 from ..data_collator.higgs_audio_collator import HiggsAudioSampleCollator
 from ..audio_processing.higgs_audio_tokenizer import load_higgs_audio_tokenizer
 
+
+BNB_CONF = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16
+)
 
 @dataclass
 class HiggsAudioStreamerDelta:
@@ -123,7 +131,7 @@ class AsyncHiggsAudioStreamer(BaseStreamer):
         text = self.tokenizer.decode(value, **self.decode_kwargs)
         delta = HiggsAudioStreamerDelta(text=text, text_tokens=value)
         if self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, delta)
+           self.loop.call_soon_threadsafe(self.queue.put_nowait, delta)
 
     def end(self):
         """Flushes any remaining text tokens and signals the end of generation."""
@@ -187,6 +195,8 @@ class HiggsAudioServeEngine:
         device: str = "cuda",
         torch_dtype: Union[torch.dtype, str] = "auto",
         kv_cache_lengths: List[int] = [1024, 4096, 8192],  # Multiple KV cache sizes
+        quantization = True,
+        whisper_model: Optional[WhisperModel] = None,
     ):
         """
         Initialize the HiggsAudioServeEngine, a serving wrapper for the HiggsAudioModel.
@@ -211,7 +221,10 @@ class HiggsAudioServeEngine:
         self.torch_dtype = torch_dtype
 
         # Initialize model and tokenizer
-        self.model = HiggsAudioModel.from_pretrained(model_name_or_path, torch_dtype=torch_dtype).to(device)
+        if quantization:
+            self.model = HiggsAudioModel.from_pretrained(model_name_or_path, quantization_config=BNB_CONF, torch_dtype=torch_dtype).to(device)
+        else:
+            self.model = HiggsAudioModel.from_pretrained(model_name_or_path, torch_dtype=torch_dtype).to(device)
         logger.info(f"Loaded model from {model_name_or_path}, dtype: {self.model.dtype}")
 
         if tokenizer_name_or_path is None:
@@ -246,16 +259,16 @@ class HiggsAudioServeEngine:
             )
             for length in sorted(kv_cache_lengths)
         }
-
-        if self.model.config.encode_whisper_embed:
+        if self.model.config.encode_whisper_embed and whisper_model is None:
             logger.info(f"Loading whisper processor")
-            whisper_processor = AutoProcessor.from_pretrained(
-                "openai/whisper-large-v3-turbo",
+            whisper_processor = WhisperModel.from_pretrained(
+                #"openai/whisper-large-v3-turbo",
+                "distil-whisper/distil-large-v3.5-ct2",
                 trust_remote=True,
                 device=self.device,
             )
         else:
-            whisper_processor = None
+            whisper_processor = whisper_model
 
         # Reuse collator to prepare inference samples
         self.collator = HiggsAudioSampleCollator(
@@ -292,35 +305,97 @@ class HiggsAudioServeEngine:
         # Configure the audio inputs
         audio_ids_l = []
         for audio_content in audio_contents:
-            if audio_content.audio_url not in ["placeholder", ""]:
-                raw_audio, _ = librosa.load(audio_content.audio_url, sr=self.audio_tokenizer.sampling_rate)
-            elif audio_content.raw_audio is not None:
-                raw_audio, _ = librosa.load(
-                    BytesIO(base64.b64decode(audio_content.raw_audio)), sr=self.audio_tokenizer.sampling_rate
-                )
-            else:
-                raw_audio = None
+            audio_ids = None
 
-            if raw_audio is not None:
-                audio_ids = self.audio_tokenizer.encode(raw_audio, self.audio_tokenizer.sampling_rate)
-                audio_ids_l.append(audio_ids.squeeze(0).cpu())
+            # Try to get cached discrete audio tokens first
+            if (audio_content.audio_url not in ["placeholder", ""] and
+                audio_content.raw_audio is None):  # Only cache file-based audio
+
+                try:
+                    from utilities.token_cache import get_cached_audio_tokens
+
+                    # Use pre-computed hash if available, otherwise compute it
+                    audio_hash = getattr(audio_content, '_temp_hash', None)
+
+                    cached_tokens = get_cached_audio_tokens(
+                        audio_content.audio_url,
+                        self.device,
+                        audio_hash=audio_hash
+                    )
+                    if cached_tokens is not None:
+                        audio_ids = cached_tokens
+                        logger.info(f"Using cached discrete audio tokens for {audio_content.audio_url}")
+
+                except (ImportError, Exception) as e:
+                    # Cache module not available or error, continue without caching
+                    logger.debug(f"Cache not available: {e}")
+
+            # If not cached, load and tokenize audio
+
+            if audio_ids is None:
+                target_sr = self.audio_tokenizer.sampling_rate
+                waveform = None
+                if audio_content.audio_url not in ["placeholder", ""]:
+                    waveform, sample_rate = torchaudio.load(audio_content.audio_url)
+                elif audio_content.raw_audio is not None:
+                    buffer = BytesIO(base64.b64decode(audio_content.raw_audio))
+                    waveform, sample_rate = torchaudio.load(buffer)
+                if waveform is not None:
+                    # Convert to mono if not already
+                    if waveform.shape[0] > 1:
+                        waveform = waveform.mean(dim=0, keepdim=True)
+                    # Resample if needed
+                    if sample_rate != target_sr:
+                        resampler = Resample(orig_freq=sample_rate, new_freq=target_sr)
+                        waveform = resampler(waveform)
+                    # Convert to numpy 1D array for downstream compatibility
+                    raw_audio = waveform.squeeze().cpu().numpy()
+                    audio_ids = self.audio_tokenizer.encode(raw_audio, target_sr)
+
+                    # Cache the computed tokens for file-based audio
+                    if (audio_content.audio_url not in ["placeholder", ""] and
+                        audio_content.raw_audio is None):
+
+                        try:
+                            from utilities.token_cache import cache_audio_tokens
+
+                            # Use pre-computed hash if available, otherwise compute it
+                            audio_hash = getattr(audio_content, '_temp_hash', None)
+
+                            cache_audio_tokens(
+                                audio_content.audio_url,
+                                audio_ids,
+                                audio_hash=audio_hash
+                            )
+                            logger.info(f"Cached discrete audio tokens for {audio_content.audio_url}")
+
+                        except (ImportError, Exception) as e:
+                            # Cache module not available or error, continue without caching
+                            logger.debug(f"Cache not available: {e}")
+
+            if audio_ids is not None:
+                # Keep audio tokens on GPU - squeeze(0) to remove batch dimension but stay on device
+                audio_ids_l.append(audio_ids.squeeze(0))
 
         if len(audio_ids_l) > 0:
-            audio_ids_start = torch.tensor(
-                np.cumsum(np.array([0] + [audio_ids.shape[1] for audio_ids in audio_ids_l])),
-                dtype=torch.long,
-                device=self.device,
-            )[0:-1]
+            # Concatenate on GPU directly - all tensors should be on the same device now
             audio_ids_concat = torch.cat(audio_ids_l, dim=1)
-        else:
-            audio_ids_start = None
-            audio_ids_concat = None
 
+            # Create start indices on GPU - avoid CPU numpy operations
+            audio_lengths = [audio_ids.shape[1] for audio_ids in audio_ids_l]
+            cumsum_lengths = torch.tensor([0] + audio_lengths, dtype=torch.long, device=self.device)
+            audio_ids_start = torch.cumsum(cumsum_lengths, dim=0)[:-1]
+        else:
+            # Ensure empty tensors are also on the correct device
+            audio_ids_start = torch.zeros(0, dtype=torch.long, device=self.device)
+            audio_ids_concat = torch.zeros((self.model.config.audio_num_codebooks, 0), dtype=torch.long, device=self.device)
+
+        # Keep input_ids on CPU (small) but avoid round-tripping large audio code tensors.
         sample = ChatMLDatasetSample(
-            input_ids=torch.LongTensor(input_tokens),
+            input_ids=torch.LongTensor(input_tokens),  # tokenizer output (CPU)
             label_ids=None,
-            audio_ids_concat=audio_ids_concat,
-            audio_ids_start=audio_ids_start,
+            audio_ids_concat=audio_ids_concat,  # already on correct device
+            audio_ids_start=audio_ids_start,  # already on correct device
             audio_waveforms_concat=None,
             audio_waveforms_start=None,
             audio_sample_rate=None,
@@ -328,9 +403,11 @@ class HiggsAudioServeEngine:
         )
         data = self.collator([sample])
         inputs = asdict(data)
+        # Move any CPU tensors (except already-on-device audio code tensors) to model device.
         for k, v in inputs.items():
-            if isinstance(v, torch.Tensor):
-                inputs[k] = v.to(self.model.device)
+            if isinstance(v, torch.Tensor) and v.device != self.model.device:
+                # Non-blocking copy for small tensors; large tensors (audio codes) already reside on device.
+                inputs[k] = v.to(self.model.device, non_blocking=True)
 
         return inputs
 
@@ -362,6 +439,7 @@ class HiggsAudioServeEngine:
             force_audio_gen: Whether to force audio generation. This ensures the model generates audio tokens rather than text tokens.
             ras_win_len: The length of the RAS window. We use 7 by default. You can disable it by setting it to None or <=0.
             ras_win_max_num_repeat: The maximum number of times to repeat the RAS window.
+            seed: Optional[int]: The seed for random number generation.
         Returns:
             A dictionary with the following keys:
                 audio: The generated audio.
@@ -489,3 +567,71 @@ class HiggsAudioServeEngine:
 
             async for delta in streamer:
                 yield delta
+
+    def generate_audio_only(
+        self,
+        chat_ml_sample: ChatMLSample,
+        max_new_tokens: int,
+        temperature: float = 0.7,
+        top_k: Optional[int] = None,
+        top_p: float = 0.95,
+        stop_strings: Optional[List[str]] = None,
+        force_audio_gen: bool = False,
+        ras_win_len: Optional[int] = 7,
+        ras_win_max_num_repeat: int = 2,
+        seed: Optional[int] = None,
+    ):
+        """
+        Generate audio from a chatml sample.
+        Args:
+            chat_ml_sample: A chatml sample.
+            max_new_tokens: The maximum number of new tokens to generate.
+            temperature: The temperature to use for the generation.
+            top_p: The top p to use for the generation.
+            stop_strings: A list of strings to stop the generation.
+            force_audio_gen: Whether to force audio generation. This ensures the model generates audio tokens rather than text tokens.
+            ras_win_len: The length of the RAS window. We use 7 by default. You can disable it by setting it to None or <=0.
+            ras_win_max_num_repeat: The maximum number of times to repeat the RAS window.
+            seed: Optional[int]: The seed for random number generation.
+        Returns:
+            A dictionary with the following keys:
+                audio: The generated audio.
+                sampling_rate: The sampling rate of the generated audio.
+        """
+        # Default stop strings
+        if stop_strings is None:
+            stop_strings = ["<|end_of_text|>", "<|eot_id|>"]
+        if ras_win_len is not None and ras_win_len <= 0:
+            ras_win_len = None
+
+        with torch.no_grad():
+            inputs = self._prepare_inputs(chat_ml_sample, force_audio_gen=force_audio_gen)
+            self._prepare_kv_caches()
+
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                use_cache=True,
+                stop_strings=stop_strings,
+                tokenizer=self.tokenizer,
+                do_sample=False if temperature == 0.0 else True,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                past_key_values_buckets=self.kv_caches,
+                ras_win_len=ras_win_len,
+                ras_win_max_num_repeat=ras_win_max_num_repeat,
+                seed=seed,
+            )
+
+            if len(outputs[1]) > 0:
+                wv_list = []
+                for output_audio in outputs[1]:
+                    vq_code = revert_delay_pattern(output_audio).clip(0, self.audio_codebook_size - 1)[:, 1:-1]
+                    wv_tensor = self.audio_tokenizer.decode_int16(vq_code.unsqueeze(0))[0, 0]
+                    wv_list.append(wv_tensor)
+                wv_tensor = torch.cat(wv_list, dim=0)
+                wv_numpy = wv_tensor.cpu().numpy()
+            else:
+                wv_numpy = None
+            return wv_numpy, self.audio_tokenizer.sampling_rate

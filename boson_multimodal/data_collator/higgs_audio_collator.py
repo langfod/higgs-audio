@@ -1,13 +1,20 @@
-import librosa
 import torch
+import torchaudio.functional as AF
 import torch.nn.functional as F
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Union, Optional, Any
 
 from dataclasses import dataclass
 from typing import List, Optional
-from transformers.models.whisper.processing_whisper import WhisperProcessor
+try:  # Optional: HF whisper processor
+    from transformers.models.whisper.processing_whisper import WhisperProcessor  # type: ignore
+except Exception:  # pragma: no cover
+    WhisperProcessor = Any  # type: ignore
 
+try:  # Optional: faster-whisper (CTranslate2 backend)
+    from faster_whisper import WhisperModel  # type: ignore
+except Exception:  # pragma: no cover
+    WhisperModel = Any  # type: ignore
 from ..dataset.chatml_dataset import ChatMLDatasetSample
 from ..model.higgs_audio.utils import build_delay_pattern_mask
 
@@ -44,6 +51,94 @@ class HiggsAudioBatchInput:
     reward: Optional[float] = None
 
 
+class _BaseWhisperFeatureExtractorWrapper:
+    """Unified interface expected by the collator.
+
+    Must provide attributes:
+        sampling_rate (int)
+        feature_size (int)  # mel bins
+        nb_max_frames (int)  # max time frames (Whisper uses 3000 for 30s, distil may be 1500)
+    And method:
+        extract(list[np.ndarray | torch.Tensor]) -> (features: torch.FloatTensor, attention_mask: torch.IntTensor)
+            features shape: (B, feature_size, nb_max_frames)
+            attention_mask shape: (B, nb_max_frames) with 1 for real, 0 for pad
+    """
+
+    sampling_rate: int
+    feature_size: int
+    nb_max_frames: int
+
+    def extract(self, wavs):  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class _HFWhisperProcessorWrapper(_BaseWhisperFeatureExtractorWrapper):
+    def __init__(self, processor: object):
+        fe = processor.feature_extractor
+        self._processor = processor
+        self.sampling_rate = fe.sampling_rate
+        self.feature_size = fe.feature_size
+        self.nb_max_frames = fe.nb_max_frames
+
+    def extract(self, wavs):
+        ret = self._processor.feature_extractor(
+            wavs,
+            sampling_rate=self.sampling_rate,
+            return_attention_mask=True,
+            padding="max_length",
+        )
+        feats = torch.from_numpy(ret["input_features"]).to(torch.float32)
+        mask = torch.from_numpy(ret["attention_mask"]).to(torch.int32)
+        return feats, mask
+
+
+class _CT2WhisperModelWrapper(_BaseWhisperFeatureExtractorWrapper):
+    """Wrapper for faster-whisper WhisperModel (CTranslate2 backend).
+
+    Uses its internal feature_extractor (log-mel spectrogram) and pads/truncates to nb_max_frames.
+    """
+
+    def __init__(self, model: object):  # type: ignore
+        fe = model.feature_extractor  # faster-whisper's FeatureExtractor
+        self._fe = fe
+        # Attribute names differ slightly
+        self.sampling_rate = getattr(fe, "sampling_rate")
+        # faster-whisper uses n_mels
+        self.feature_size = getattr(fe, "n_mels")
+        # nb_max_frames exists; fallback compute: int(30 * 1000 / 10) = 3000 if absent
+        self.nb_max_frames = getattr(fe, "nb_max_frames", 3000)
+
+    def extract(self, wavs):
+        feat_list = []
+        mask_list = []
+        for w in wavs:
+            if isinstance(w, torch.Tensor):
+                w_np = w.detach().cpu().float().numpy()
+            else:
+                w_np = w
+            # compute_log_mel_spectrogram returns numpy ndarray (n_mels, T)
+            f = self._fe.compute_log_mel_spectrogram(w_np)
+            # Convert to torch
+            f_t = torch.from_numpy(f).to(torch.float32)  # (n_mels, T)
+            T = f_t.shape[-1]
+            if T >= self.nb_max_frames:
+                f_t = f_t[:, : self.nb_max_frames]
+                mask = torch.ones(self.nb_max_frames, dtype=torch.int32)
+            else:
+                pad = self.nb_max_frames - T
+                f_t = torch.cat([f_t, torch.zeros(f_t.shape[0], pad, dtype=f_t.dtype)], dim=1)
+                mask = torch.cat([torch.ones(T, dtype=torch.int32), torch.zeros(pad, dtype=torch.int32)])
+            feat_list.append(f_t.unsqueeze(0))
+            mask_list.append(mask.unsqueeze(0))
+        if len(feat_list) == 0:
+            feats = torch.zeros((0, self.feature_size, self.nb_max_frames), dtype=torch.float32)
+            masks = torch.zeros((0, self.nb_max_frames), dtype=torch.int32)
+        else:
+            feats = torch.cat(feat_list, dim=0)
+            masks = torch.cat(mask_list, dim=0)
+        return feats, masks
+
+
 class HiggsAudioSampleCollator:
     """Sample collator for Higgs-Audio model.
 
@@ -67,12 +162,12 @@ class HiggsAudioSampleCollator:
 
     def __init__(
         self,
-        whisper_processor: WhisperProcessor,
-        audio_in_token_id,
-        audio_out_token_id,
-        pad_token_id,
-        audio_stream_bos_id,
-        audio_stream_eos_id,
+    whisper_processor: Union[object, Any],
+        audio_in_token_id: int,
+        audio_out_token_id: int,
+        pad_token_id: int,
+        audio_stream_bos_id: int,
+        audio_stream_eos_id: int,
         round_to=8,
         pad_left=False,
         encode_whisper_embed=True,
@@ -84,7 +179,20 @@ class HiggsAudioSampleCollator:
         add_new_bos_eos_for_long_chunk=True,
         mask_audio_out_token_label=True,
     ):
-        self.whisper_processor = whisper_processor
+        # Dual-mode: accept HF WhisperProcessor or faster-whisper WhisperModel
+        self.whisper_processor = whisper_processor  # keep original attribute for backward compat
+        self._fe: Optional[_BaseWhisperFeatureExtractorWrapper] = None
+        if encode_whisper_embed and whisper_processor is not None:
+            if "faster_whisper" in type(whisper_processor).__module__:
+                # CTranslate2 backend
+                try:
+                    self._fe = _CT2WhisperModelWrapper(whisper_processor)  # type: ignore[arg-type]
+                except Exception as e:  # pragma: no cover
+                    raise RuntimeError(f"Failed to wrap faster-whisper WhisperModel: {e}")
+            elif hasattr(whisper_processor, "feature_extractor"):
+                self._fe = _HFWhisperProcessorWrapper(whisper_processor)  # type: ignore[arg-type]
+            else:  # pragma: no cover
+                raise TypeError("Unsupported whisper_processor type: must have feature_extractor or be faster-whisper WhisperModel")
         self.round_to = round_to
         self.pad_left = pad_left
         self.audio_in_token_id = audio_in_token_id
@@ -96,9 +204,9 @@ class HiggsAudioSampleCollator:
         self.return_audio_in_tokens = return_audio_in_tokens
         self.audio_num_codebooks = audio_num_codebooks
         self.use_delay_pattern = use_delay_pattern
-        if encode_whisper_embed:
+        if encode_whisper_embed and self._fe is not None:
             self.chunk_size_seconds = chunk_size_seconds
-            self.chunk_size_samples = int(chunk_size_seconds * whisper_processor.feature_extractor.sampling_rate)
+            self.chunk_size_samples = int(chunk_size_seconds * self._fe.sampling_rate)
         else:
             self.chunk_size_seconds = None
             self.chunk_size_samples = None
@@ -158,6 +266,17 @@ class HiggsAudioSampleCollator:
         else:
             return_labels = True
 
+        # Determine target device for codebook tensors (keep audio code tensors on their existing device if provided)
+        # Fallback to CPU for tokenizer/input id padding if everything is CPU.
+        code_device = None
+        for s in batch:
+            if getattr(s, 'audio_ids_concat', None) is not None and isinstance(s.audio_ids_concat, torch.Tensor):
+                code_device = s.audio_ids_concat.device
+                break
+        if code_device is None:
+            # Fall back to device of first input_ids tensor
+            code_device = batch[0].input_ids.device
+
         if self.encode_whisper_embed:
             # Process each sample in the batch to handle long audio
             # TODO(?) The implementation here can be optimized.
@@ -179,18 +298,19 @@ class HiggsAudioSampleCollator:
 
                 # Process input audio tokens
                 for idx, audio_idx in enumerate(audio_in_indices):
-                    # Get the audio for this token
-                    wv, sr = sample.get_wv(idx)  # Use idx since we want the original audio index
-                    if sr != self.whisper_processor.feature_extractor.sampling_rate:
-                        resampled_wv = librosa.resample(
-                            wv.cpu().numpy(),
-                            orig_sr=sr,
-                            target_sr=self.whisper_processor.feature_extractor.sampling_rate,
-                        )
-                    else:
-                        resampled_wv = wv.cpu().numpy()
-                    wv = torch.tensor(resampled_wv, device=wv.device)
-                    sr = self.whisper_processor.feature_extractor.sampling_rate
+                    # Get the audio for this token (torch Tensor, 1D)
+                    wv, sr = sample.get_wv(idx)
+                    target_sr = self._fe.sampling_rate if self._fe is not None else sr
+                    if sr != target_sr:
+                        # Ensure float tensor for resampling
+                        if not torch.is_floating_point(wv):
+                            wv = wv.float()
+                        # If on GPU keep it there; torchaudio supports CUDA resample (fallback to CPU if needed)
+                        wv = AF.resample(wv.unsqueeze(0), sr, target_sr).squeeze(0)
+                        sr = target_sr
+                    # Ensure dtype consistency
+                    if wv.dtype != torch.float32:
+                        wv = wv.to(torch.float32)
 
                     # Process and duplicate tokens if necessary
                     token_pos = audio_idx + offset
@@ -300,13 +420,13 @@ class HiggsAudioSampleCollator:
             if self.encode_whisper_embed:
                 for idx in audio_in_ids:
                     wv, sr = processed_batch[i].get_wv(idx)
-                    resampled_wv = wv.cpu().numpy()
-                    # Split long audio into chunks
+                    # Move to CPU only once here for Whisper feature extractor needs
+                    wv_cpu = wv.detach().to('cpu')
+                    resampled_wv = wv_cpu.numpy()
                     total_samples = len(resampled_wv)
                     for chunk_start in range(0, total_samples, self.chunk_size_samples):
                         chunk_end = min(chunk_start + self.chunk_size_samples, total_samples)
-                        chunk = resampled_wv[chunk_start:chunk_end]
-                        audio_in_wv_l.append(chunk)
+                        audio_in_wv_l.append(resampled_wv[chunk_start:chunk_end])
             # assert len(audio_in_wv_l) == processed_batch[i].num_audios(), \
             #     f"Assertion failed: Mismatch in number of audios. " \
             #     f"Expected {processed_batch[i].num_audios()}, but got {len(audio_in_wv_l)} at index {i}."
@@ -315,31 +435,23 @@ class HiggsAudioSampleCollator:
             audio_out_no_train_flag = torch.cat(audio_out_no_train_flag, dim=0)
 
         # Process all audio features
-        if len(audio_in_wv_l) > 0:
-            feature_ret = self.whisper_processor.feature_extractor(
-                audio_in_wv_l,
-                sampling_rate=self.whisper_processor.feature_extractor.sampling_rate,
-                return_attention_mask=True,
-                padding="max_length",
-            )
-            audio_features = torch.from_numpy(feature_ret["input_features"])
-            audio_feature_attention_mask = torch.from_numpy(feature_ret["attention_mask"])
-        else:
-            if self.encode_whisper_embed:
-                audio_features = torch.zeros(
-                    (
-                        0,
-                        self.whisper_processor.feature_extractor.feature_size,
-                        self.whisper_processor.feature_extractor.nb_max_frames,
-                    ),
-                    dtype=torch.float32,
-                )
-                audio_feature_attention_mask = torch.zeros(
-                    (0, self.whisper_processor.feature_extractor.nb_max_frames), dtype=torch.int32
-                )
+        if self.encode_whisper_embed:
+            if len(audio_in_wv_l) > 0:
+                if self._fe is None:
+                    raise RuntimeError("Feature extractor wrapper not initialized while encode_whisper_embed=True")
+                audio_features, audio_feature_attention_mask = self._fe.extract(audio_in_wv_l)
             else:
-                audio_features = None
-                audio_feature_attention_mask = None
+                if self._fe is None:
+                    audio_features = None
+                    audio_feature_attention_mask = None
+                else:
+                    audio_features = torch.zeros(
+                        (0, self._fe.feature_size, self._fe.nb_max_frames), dtype=torch.float32
+                    )
+                    audio_feature_attention_mask = torch.zeros((0, self._fe.nb_max_frames), dtype=torch.int32)
+        else:
+            audio_features = None
+            audio_feature_attention_mask = None
 
         # Process audio input tokens
         if len(audio_in_ids_l) > 0:
@@ -353,9 +465,9 @@ class HiggsAudioSampleCollator:
                 else:
                     audio_codes = torch.cat(
                         [
-                            torch.full((ele.shape[0], 1), self.audio_stream_bos_id, dtype=torch.long),
+                            torch.full((ele.shape[0], 1), self.audio_stream_bos_id, dtype=torch.long, device=ele.device),
                             ele,
-                            torch.full((ele.shape[0], 1), self.audio_stream_eos_id, dtype=torch.long),
+                            torch.full((ele.shape[0], 1), self.audio_stream_eos_id, dtype=torch.long, device=ele.device),
                         ],
                         dim=1,
                     )
@@ -368,11 +480,11 @@ class HiggsAudioSampleCollator:
                 new_audio_in_ids_l.append(audio_codes)
             audio_in_ids = torch.cat(new_audio_in_ids_l, dim=1).long()
             audio_in_ids_start = torch.cumsum(
-                torch.tensor([0] + [audio_codes.shape[1] for audio_codes in new_audio_in_ids_l[:-1]]), dim=0
-            )
+                torch.tensor([0] + [audio_codes.shape[1] for audio_codes in new_audio_in_ids_l[:-1]], device=code_device), dim=0
+            ).to(code_device)
         else:
-            audio_in_ids = torch.zeros((0, 0), dtype=torch.long)
-            audio_in_ids_start = torch.zeros(0, dtype=torch.long)
+            audio_in_ids = torch.zeros((0, 0), dtype=torch.long, device=code_device)
+            audio_in_ids_start = torch.zeros(0, dtype=torch.long, device=code_device)
 
         # Process audio output tokens
         audio_out_ids_start_group_loc = None
@@ -389,18 +501,18 @@ class HiggsAudioSampleCollator:
                 else:
                     audio_codes = torch.cat(
                         [
-                            torch.full((ele.shape[0], 1), self.audio_stream_bos_id, dtype=torch.long),
+                            torch.full((ele.shape[0], 1), self.audio_stream_bos_id, dtype=torch.long, device=ele.device),
                             ele,
-                            torch.full((ele.shape[0], 1), self.audio_stream_eos_id, dtype=torch.long),
+                            torch.full((ele.shape[0], 1), self.audio_stream_eos_id, dtype=torch.long, device=ele.device),
                         ],
                         dim=1,
                     )
                     if return_labels:
                         label_audio_ids = torch.cat(
                             [
-                                torch.full((ele.shape[0], 1), -100, dtype=torch.long),
+                                torch.full((ele.shape[0], 1), -100, dtype=torch.long, device=ele.device),
                                 ele,
-                                torch.full((ele.shape[0], 1), self.audio_stream_eos_id, dtype=torch.long),
+                                torch.full((ele.shape[0], 1), self.audio_stream_eos_id, dtype=torch.long, device=ele.device),
                             ],
                             dim=1,
                         )
@@ -427,16 +539,16 @@ class HiggsAudioSampleCollator:
             if return_labels:
                 label_audio_ids = torch.cat(label_audio_ids_l, dim=1).long()
             audio_out_ids_start = torch.cumsum(
-                torch.tensor([0] + [audio_codes.shape[1] for audio_codes in new_audio_out_ids_l[:-1]]), dim=0
-            )
-            audio_out_ids_start_group_loc = torch.tensor(audio_out_ids_group_loc_l, dtype=torch.long)
+                torch.tensor([0] + [audio_codes.shape[1] for audio_codes in new_audio_out_ids_l[:-1]], device=code_device), dim=0
+            ).to(code_device)
+            audio_out_ids_start_group_loc = torch.tensor(audio_out_ids_group_loc_l, dtype=torch.long, device=code_device)
         else:
-            audio_out_ids = torch.zeros((0, 0), dtype=torch.long)
-            audio_out_ids_start = torch.zeros(0, dtype=torch.long)
+            audio_out_ids = torch.zeros((0, 0), dtype=torch.long, device=code_device)
+            audio_out_ids_start = torch.zeros(0, dtype=torch.long, device=code_device)
             if return_labels:
-                label_audio_ids = torch.zeros((0, 0), dtype=torch.long)
+                label_audio_ids = torch.zeros((0, 0), dtype=torch.long, device=code_device)
 
-        reward = torch.tensor(reward_l, dtype=torch.float32)
+        reward = torch.tensor(reward_l, dtype=torch.float32, device=code_device)
 
         # Handle padding for input ids and attention mask
         if self.pad_left:
@@ -496,7 +608,7 @@ class HiggsAudioSampleCollator:
         return HiggsAudioBatchInput(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            audio_features=audio_features,
+            audio_features=audio_features,  # Whisper features remain on CPU; moved later if needed
             audio_feature_attention_mask=audio_feature_attention_mask,
             audio_out_ids=audio_out_ids,
             audio_out_ids_start=audio_out_ids_start,

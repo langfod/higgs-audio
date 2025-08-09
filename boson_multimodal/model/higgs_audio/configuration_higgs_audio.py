@@ -154,6 +154,16 @@ class HiggsAudioConfig(PretrainedConfig):
         audio_eos_token_id=128012,
         **kwargs,
     ):
+        # Set attn_implementation for sub-configs if not present (Context7 best practice)
+        attn_impl = "sdpa"
+        if isinstance(text_config, dict):
+            text_config["attn_implementation"] = attn_impl
+        elif text_config is not None:
+            setattr(text_config, "attn_implementation", attn_impl)
+        if isinstance(audio_encoder_config, dict):
+            audio_encoder_config["attn_implementation"] = attn_impl
+        elif audio_encoder_config is not None:
+            setattr(audio_encoder_config, "attn_implementation", attn_impl)
         if isinstance(audio_encoder_config, dict):
             audio_encoder_config["model_type"] = (
                 audio_encoder_config["model_type"] if "model_type" in audio_encoder_config else "higgs_audio_encoder"

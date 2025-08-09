@@ -2,7 +2,6 @@ import math
 from typing import List
 from typing import Union
 
-import numpy as np
 import torch
 from audiotools import AudioSignal
 from audiotools.ml import BaseModel
