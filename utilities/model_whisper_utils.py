@@ -9,8 +9,8 @@ from loguru import logger
 from .file_utils import (get_transcription_filepath_by_hash,
                          save_transcription_to_cache)
 
-#WHISPER_MODEL = "Numbat/faster-skyrim-whisper-base.en"
-WHISPER_MODEL = "distil-whisper/distil-large-v3.5-ct2"
+WHISPER_MODEL = "Numbat/faster-skyrim-whisper-base.en"
+#WHISPER_MODEL = "distil-whisper/distil-large-v3.5-ct2"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 WHISPER_ENGINE: Optional[WhisperModel]= None
@@ -23,7 +23,7 @@ def initialize_whisper_model():
             logger.info("Loading Whisper model...")
             #WHISPER_ENGINE = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="bfloat16")
             #WHISPER_ENGINE = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-            WHISPER_ENGINE = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type="float16" if DEVICE=="cuda" else "int8")
+            WHISPER_ENGINE = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type="int8" if DEVICE=="cuda" else "int8")
             logger.info("Whisper model loaded successfully.")
     return WHISPER_ENGINE
 

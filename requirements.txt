@@ -18,15 +18,16 @@ huggingface_hub[cli]
 huggingface_hub
 hf_xet
 bitsandbytes
+click
+fastapi
 gradio
 python-dateutil
 psutil
 imohash
 
 # For examples:
-#click
 #langid
 #jieba
 #pydantic
 #starlette
-#fastapi
+
