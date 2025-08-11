@@ -1,6 +1,7 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
+import numpy as np
 from faster_whisper import WhisperModel
 
 from boson_multimodal.data_types import AudioContent, ChatMLSample, Message
@@ -23,22 +24,10 @@ def initialize_higgs_model(whisper_model: WhisperModel, quantization: bool = Fal
             quantization=quantization,
             whisper_model=whisper_model
         )
-        #try:
-        #    HIGGS_ENGINE = HiggsAudioServeEngine(
-        #        MODEL_PATH,
-        #        AUDIO_TOKENIZER_PATH,
-        #        device=DEVICE,
-        #        quantization=quantization,
-        #        attn_implementation=attn_implementation
-        #    )
-#
-        #except Exception as e:
-        #    import traceback
-        #    print(traceback.format_exc())
-        #    logger.error(f"Failed to load Higgs model: {str(e)}")
+
     return HIGGS_ENGINE
 
-def create_voice_cloning_chatmlsample(ref_audio_path: str, ref_text: str, target_text: str, ref_audio_hash: str = None) -> ChatMLSample:
+def create_voice_cloning_chatmlsample(ref_audio_path: str, ref_text: str, target_text: str, ref_audio_hash: str = None, ref_config: str = None, raw_audio: Optional[Tuple[np.ndarray, int]] = None, ref_audio_uuid: int = None) -> ChatMLSample:
     """Create ChatMLSample for voice cloning using reference audio.
 
     Caching is handled automatically by the serve engine during processing.
@@ -49,17 +38,22 @@ def create_voice_cloning_chatmlsample(ref_audio_path: str, ref_text: str, target
         target_text: Text to generate in the reference voice
         ref_audio_hash: Pre-computed hash of the reference audio file (optional)
     """
+    audio_content = AudioContent(audio_url=ref_audio_path)
     if ref_audio_hash:
-        audio_content = AudioContent(audio_url=ref_audio_path)
-        audio_content._temp_hash = ref_audio_hash
-    else:
-        audio_content = AudioContent(audio_url=ref_audio_path)
+        audio_content._temp_hash = ref_audio_hash          
+    
+    if raw_audio is not None:
+        audio_content.raw_audio = raw_audio
+
+    if ref_audio_uuid is not None:
+        audio_content._temp_uuid = ref_audio_uuid
 
     messages = [
         Message(role="user", content=ref_text),
         Message(role="assistant", content=audio_content),
         Message(role="user", content=target_text),
     ]
+    
     return ChatMLSample(messages=messages)
 
 

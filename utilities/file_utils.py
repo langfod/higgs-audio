@@ -3,6 +3,7 @@ import functools
 from pathlib import Path
 
 from imohash import hashfile
+from typing import Optional
 
 CACHE_BASE = Path.cwd()
 CACHE_DIR = CACHE_BASE.joinpath("cache")
@@ -14,17 +15,31 @@ def get_cache_dir() -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
+@functools.cache
+def uuid_to_str(uuid: int) -> str:
+    try:
+        uuid_hex = hex(uuid)[2:]  # Remove '0x' prefix
+    except (TypeError, ValueError):
+        uuid_hex = str(uuid)
+    return uuid_hex
+
+@functools.cache
 def get_file_hash(file_path: str) -> str:
     return hashfile(file_path, hexdigest=True)
 
-def get_transcription_filepath_by_hash(filename, hash: str) :
-    """Get cached transcription if it exists."""
-    cache_file = Path(get_cache_dir()).joinpath(f"{filename}_{hash}_transcription.txt")
-    if cache_file.exists():
-        return cache_file.resolve(strict=True)
-    return None
+@functools.cache
+def _create_cache_file_path(filename, audio_file_hash, uuid):
+    cache_file = get_cache_dir().joinpath(f"{filename}_{audio_file_hash}_{uuid_to_str(uuid)}_transcription.txt")
+    return cache_file
 
-def save_transcription_to_cache(filename, audio_hash: str, transcription: str) -> None:
+def save_transcription_to_cache(filename, audio_file_hash: str, uuid: int, transcription: str) -> None:
     """Save transcription to cache."""
-    cache_file = get_cache_dir().joinpath(f"{filename}_{audio_hash}_transcription.txt")
+    cache_file = _create_cache_file_path(filename, audio_file_hash, uuid)
     cache_file.write_text(data=transcription, encoding="utf-8")
+
+@functools.cache
+def get_cached_transcription(filename, audio_file_hash: str, uuid: int) -> Optional[str]:
+    cache_file = _create_cache_file_path(filename, audio_file_hash, uuid)
+    if cache_file.exists():
+        return  cache_file.read_text(encoding="utf-8")    
+    raise FileNotFoundError

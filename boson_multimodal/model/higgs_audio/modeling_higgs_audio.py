@@ -1472,8 +1472,10 @@ class HiggsAudioModel(HiggsAudioPreTrainedModel, GenerationMixin):
             assert to_cache_len >= from_cache_size, (
                 f"The target cache size {to_cache_len} is smaller than the source cache size {from_cache_size}."
             )
-            to_cache.key_cache[layer_idx][:, :, :from_cache_size, :] = from_cache.key_cache[layer_idx]
-            to_cache.value_cache[layer_idx][:, :, :from_cache_size, :] = from_cache.value_cache[layer_idx]
+            #to_cache.key_cache[layer_idx][:, :, :from_cache_size, :] = from_cache.key_cache[layer_idx]
+            #to_cache.value_cache[layer_idx][:, :, :from_cache_size, :] = from_cache.value_cache[layer_idx]
+            to_cache.layers[layer_idx].keys[:, :, :from_cache_size, :] = from_cache.layers[layer_idx].keys
+            to_cache.layers[layer_idx].values[:, :, :from_cache_size, :] = from_cache.layers[layer_idx].values
 
     def _prepare_kv_cache(
         self,

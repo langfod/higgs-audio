@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import torch
 from loguru import logger
 
-from .file_utils import get_cache_dir, get_file_hash
+from .file_utils import get_cache_dir, get_file_hash, uuid_to_str
 
 _AUDIO_TOKEN_CACHE = {}
 _CACHE_ENABLED = False
@@ -64,7 +64,7 @@ def _get_filename_from_path(audio_path: str) -> str:
     """Extract filename from audio path for cache naming."""
     return Path(audio_path).stem
 
-def get_cached_audio_tokens(audio_path: str, device: torch.device, audio_hash: str = None, filename: str = None) -> Optional[torch.Tensor]:
+def get_cached_audio_tokens(audio_path: str, device: torch.device, audio_hash: str = None, filename: str = None, uuid:int = 0) -> Optional[torch.Tensor]:
     """Get cached discrete audio tokens if available.
 
     Args:
@@ -91,7 +91,7 @@ def get_cached_audio_tokens(audio_path: str, device: torch.device, audio_hash: s
 
     # Try disk cache
     if _DISK_CACHE_ENABLED:
-        audio_tokens = _load_audio_tokens_from_disk(audio_path, device, audio_hash, filename)
+        audio_tokens = _load_audio_tokens_from_disk(audio_path, device, audio_hash, filename, uuid)
         if audio_tokens is not None:
             if _CACHE_ENABLED:
                 _AUDIO_TOKEN_CACHE[audio_hash] = audio_tokens.to(device)
@@ -99,7 +99,7 @@ def get_cached_audio_tokens(audio_path: str, device: torch.device, audio_hash: s
 
     return None
 
-def cache_audio_tokens(audio_path: str, audio_tokens: torch.Tensor, audio_hash: str = None, filename: str = None) -> None:
+def cache_audio_tokens(audio_path: str, audio_tokens: torch.Tensor, audio_hash: str = None, filename: str = None, uuid:int = 0) -> None:
     """Cache discrete audio tokens.
 
     Args:
@@ -121,11 +121,11 @@ def cache_audio_tokens(audio_path: str, audio_tokens: torch.Tensor, audio_hash: 
     if _DISK_CACHE_ENABLED:
         threading.Thread(
             target=_save_audio_tokens_to_disk,
-            args=(audio_path, audio_tokens, audio_hash, filename),
+            args=(audio_path, audio_tokens, audio_hash, filename, uuid),
             daemon=True
         ).start()
 
-def _save_audio_tokens_to_disk(audio_path: str, audio_tokens: torch.Tensor, audio_hash: str = None, filename: str = None) -> None:
+def _save_audio_tokens_to_disk(audio_path: str, audio_tokens: torch.Tensor, audio_hash: str = None, filename: str = None, uuid:int=0) -> None:
     """Save discrete audio tokens to disk cache."""
     if not _DISK_CACHE_ENABLED:
         return
@@ -136,14 +136,16 @@ def _save_audio_tokens_to_disk(audio_path: str, audio_tokens: torch.Tensor, audi
         if filename is None:
             filename = _get_filename_from_path(audio_path)
 
-        cache_file = get_cache_dir().joinpath(f"{filename}_{audio_hash}_tokens.pt")
+        cache_file = get_cache_dir().joinpath(f"{filename}_{audio_hash}_{uuid_to_str(uuid)}_tokens.pt")
 
         torch.save(audio_tokens.cpu(), cache_file)
         logger.info(f"Saved audio tokens to disk: {cache_file}")
     except Exception as e:
+        import traceback
+        print(traceback.format_exc())
         logger.warning(f"Failed to save audio tokens to disk for path {audio_path}: {str(e)}")
 
-def _load_audio_tokens_from_disk(audio_path: str, device: torch.device, audio_hash: str = None, filename: str = None) -> Optional[torch.Tensor]:
+def _load_audio_tokens_from_disk(audio_path: str, device: torch.device, audio_hash: Optional[str] = None, filename: Optional[str] = None, uuid:int=0) -> Optional[torch.Tensor]:
     """Load discrete audio tokens from disk cache."""
     if not _DISK_CACHE_ENABLED:
         return None
@@ -154,7 +156,7 @@ def _load_audio_tokens_from_disk(audio_path: str, device: torch.device, audio_ha
         if filename is None:
             filename = _get_filename_from_path(audio_path)
 
-        cache_file = get_cache_dir().joinpath(f"{filename}_{audio_hash}_tokens.pt")
+        cache_file = get_cache_dir().joinpath(f"{filename}_{audio_hash}_{uuid_to_str(uuid)}_tokens.pt")
         if not cache_file.exists():
             return None
 
@@ -162,5 +164,7 @@ def _load_audio_tokens_from_disk(audio_path: str, device: torch.device, audio_ha
         logger.info(f"Loaded audio tokens from disk: {cache_file}")
         return audio_tokens
     except Exception as e:
+        import traceback
+        print(traceback.format_exc())
         logger.warning(f"Failed to load audio tokens from disk for path {audio_path}: {str(e)}")
         return None

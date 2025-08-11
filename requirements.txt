@@ -1,13 +1,15 @@
 --extra-index-url=https://download.pytorch.org/whl/cu129
 torch<2.9
 torchaudio
+torchcodec ; sys_platform != 'win32'
 
 numpy
 descript-audio-codec
 transformers==4.55.0
 faster-whisper
-dacite
 soundfile
+praat-parselmouth
+dacite
 pandas
 vector_quantize_pytorch
 loguru

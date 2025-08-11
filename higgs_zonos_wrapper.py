@@ -1,6 +1,5 @@
 """Higgs TTS Gradio Wrapper for Zonos Client Compatibility."""
 from pathlib import Path
-from typing import Optional
 
 import gradio as gr
 import time
@@ -8,29 +7,33 @@ import sys
 import warnings
 
 from loguru import logger
+import torch
 
 from utilities.model_higgs_utils_ import initialize_higgs_model, create_voice_cloning_chatmlsample, create_text_to_speech_chatmlsample
 from utilities.token_cache import enable_token_cache, get_cache_stats
 from utilities.model_whisper_utils import initialize_whisper_model, transcribe_audio_with_whisper
 from utilities.text_utils import pre_process_text
 from utilities.file_utils import get_file_hash
+from utilities.torch_utils import load_audio
+from utilities.voice_style_describer import initialize_describer_models
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 current_dir = Path.cwd()
 sys.path.append(str(current_dir.resolve()))
 
-from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine
-from faster_whisper import WhisperModel
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-enable_token_cache(memory_cache=True, disk_cache=True)
+ENABLE_STYLE = False
+
 try:
+    if ENABLE_STYLE:
+        initialize_describer_models(use_accent=True)
     WHISPER_ENGINE = initialize_whisper_model()
     HIGGS_ENGINE = initialize_higgs_model(whisper_model=WHISPER_ENGINE, quantization=True)
 except Exception as e:
     logger.error(f"Failed to initialize models: {str(e)}")
     exit(1)
-
-
+enable_token_cache(memory_cache=True, disk_cache=True)
 
 ##### Gradio Stuff
 def generate_audio(
@@ -65,7 +68,10 @@ def generate_audio(
     unconditional_keys = None,  # Ignored parameter
 ):
     """Core function for generating audio using Higgs TTS - must match Zonos API exactly."""
-
+    uuid = seed
+    if randomize_seed:
+        seed = torch.randint(0, 2 ** 32 - 1, (1,)).item()
+        torch.manual_seed(seed)
 
     # Input validation
     if not text or not text.strip():
@@ -74,7 +80,6 @@ def generate_audio(
     processed_text = pre_process_text(text)
 
     # Get reference audio path from Gradio file object
-    print(f"Speaker audio: {speaker_audio}")
     ref_audio_path = None
     if speaker_audio is not None and hasattr(speaker_audio, 'name'):
         ref_audio_path = speaker_audio.name
@@ -86,13 +91,17 @@ def generate_audio(
             # Voice cloning mode
             logger.info(f"Creating voice cloning sample with reference audio: {ref_audio_path} and text: {processed_text}")
             ref_audio_hash = get_file_hash(ref_audio_path)
-            reference_text = transcribe_audio_with_whisper(ref_audio_path, ref_audio_hash, language=language)
+            ref_audio_torch = load_audio(ref_audio_path)
+
+            reference_text = transcribe_audio_with_whisper(ref_audio_path, ref_audio_hash, language=language, ref_audio_torch=ref_audio_torch, uuid=uuid, enable_style=ENABLE_STYLE, enable_disk_cache=True)
 
             chat_sample = create_voice_cloning_chatmlsample(
                 ref_audio_path=ref_audio_path,
                 ref_text=reference_text,
                 target_text=processed_text,
-                ref_audio_hash=ref_audio_hash
+                ref_audio_hash=ref_audio_hash,
+                ref_audio_uuid=uuid,
+                raw_audio=ref_audio_torch if ref_audio_torch is not None else None
             )
         else:
             # Regular text-to-speech mode
@@ -102,23 +111,11 @@ def generate_audio(
         # Generate audio using serve engine
         logger.info("Starting audio generation...")
         start = time.time()
-        
-        #higgs_audio_response: HiggsAudioResponse = HIGGS_ENGINE.generate(
-        #    chat_ml_sample=chat_sample,
-        #    max_new_tokens=2048,
-        #    temperature=0.3,
-        #    top_k=top_k,
-        #    top_p=top_p if top_p > 0 else 0.95,
-        #    ras_win_len=speaking_rate, #7,
-        #    ras_win_max_num_repeat=dnsmos_overall, #2,
-        #    seed=int(seed) if seed else None,
-        #    stop_strings=["<|eot_id|>", "<|end_of_text|>", "<|audio_eos|>"],
-        #)
 
         higgs_wav_out, higgs_sr = HIGGS_ENGINE.generate_audio_only(
             chat_ml_sample=chat_sample,
-            max_new_tokens=2048,
-            temperature=0.3,
+            max_new_tokens=800,
+            temperature=0.7,
             top_k=top_k,
             top_p=top_p if top_p > 0 else 0.95,
             ras_win_len=speaking_rate,  # 7,
@@ -128,14 +125,13 @@ def generate_audio(
         )
         end = time.time()
         elapsed_ms = (end - start) * 1000
-        logger.info(f"Audio generation completed in {elapsed_ms:.2f} ms")
+        wav_length = higgs_wav_out.shape[-1]   / higgs_sr
+        logger.info(f"Audio generation of {wav_length:.2f}s in {elapsed_ms/1000:.6f}s; Speed: {wav_length / (elapsed_ms/1000):.4f}x")
 
         stats = get_cache_stats()
-        print(f"📊 Cache Statistics:")
-        #print(f"  Memory cache enabled: {stats['memory_cache_enabled']}")
-        #print(f"  Disk cache enabled: {stats['disk_cache_enabled']}")
-        print(f"  Memory token cache: {stats['memory_token_cache_size']} items")
-        print(f"  Disk token cache: {stats['disk_token_cache_size']} files")
+        print(f"📊 Conditioned Embed Token cache Statistics:")
+        print(f"  Memory cache {f'enabled' if stats['memory_cache_enabled'] else 'disabled'}   - Disk cache {f'enabled' if stats['disk_cache_enabled'] else 'disabled'}")
+        print(f"  Memory token cache: {stats['memory_token_cache_size']} - Disk token cache: {stats['disk_token_cache_size']}")
         #print(f"  Total cached items: {stats['total_cached_items']}")
         #if stats['memory_token_cache_keys']:
         #    print(f"  Token cache keys: {stats['memory_token_cache_keys'][:3]}...")  # Show first 3 keys
@@ -168,7 +164,7 @@ api_inputs = [
     gr.Slider(minimum=20, maximum=150, value=45, label="Pitch Std"),  # 15: pitch_std
     #gr.Slider(minimum=0, maximum=50, value=14.6, label="Speaking Rate"),  # 16: speaking_rate
     #gr.Slider(minimum=1, maximum=5, value=4, label="DNSMOS Overall"),  # 17: dnsmos_overall
-    gr.Slider(minimum=0, maximum=10, value=7, label="RAS Window"),  # 16: speaking_rate
+    gr.Slider(minimum=-1, maximum=100, value=20, label="RAS Window", step=1),  # 16: speaking_rate
     gr.Slider(minimum=1, maximum=10, value=2, label="Max Repeat"),  # 17: dnsmos_overall
     gr.Checkbox(value=True, label="Denoise Speaker"),  # 18: denoise_speaker
     gr.Slider(minimum=1, maximum=10, value=3, label="CFG Scale"),  # 19: cfg_scale
@@ -178,7 +174,7 @@ api_inputs = [
     gr.Checkbox(value=False, label="Linear"),  # 23: linear
     gr.Slider(minimum=0, maximum=1, value=0.7, label="Confidence"),  # 24: confidence
     gr.Checkbox(value=False, label="Quadratic"),  # 25: quadratic
-    gr.Number(value=123, label="Seed"),  # 26: seed
+    gr.Number(value=42, label="Seed", precision=0),  # 26: seed
     gr.Checkbox(value=False, label="Randomize Seed"),  # 27: randomize_seed
     gr.Textbox(value="[]", label="Unconditional Keys"),  # 28: unconditional_keys (empty list)
 ]

@@ -307,39 +307,48 @@ class HiggsAudioServeEngine:
         for audio_content in audio_contents:
             audio_ids = None
 
-            # Try to get cached discrete audio tokens first
-            if (audio_content.audio_url not in ["placeholder", ""] and
-                audio_content.raw_audio is None):  # Only cache file-based audio
+            # Try to get cached discrete audio tokens first - Only cache file-based audio
+            if (
+                audio_content.audio_url not in ["placeholder", ""] and
+                (audio_content.raw_audio is None or
+                (isinstance(audio_content.raw_audio, tuple) and isinstance(audio_content.raw_audio[0], torch.Tensor))
+                )
+               ):  
 
                 try:
                     from utilities.token_cache import get_cached_audio_tokens
 
                     # Use pre-computed hash if available, otherwise compute it
                     audio_hash = getattr(audio_content, '_temp_hash', None)
+                    uuid = getattr(audio_content, '_temp_uuid', 0)
 
                     cached_tokens = get_cached_audio_tokens(
                         audio_content.audio_url,
                         self.device,
-                        audio_hash=audio_hash
+                        audio_hash=audio_hash,
+                        uuid=uuid
                     )
                     if cached_tokens is not None:
                         audio_ids = cached_tokens
                         logger.info(f"Using cached discrete audio tokens for {audio_content.audio_url}")
 
                 except (ImportError, Exception) as e:
+                    import traceback
+                    print(traceback.format_exc())
                     # Cache module not available or error, continue without caching
                     logger.debug(f"Cache not available: {e}")
 
             # If not cached, load and tokenize audio
-
             if audio_ids is None:
                 target_sr = self.audio_tokenizer.sampling_rate
                 waveform = None
-                if audio_content.audio_url not in ["placeholder", ""]:
-                    waveform, sample_rate = torchaudio.load(audio_content.audio_url)
-                elif audio_content.raw_audio is not None:
-                    buffer = BytesIO(base64.b64decode(audio_content.raw_audio))
-                    waveform, sample_rate = torchaudio.load(buffer)
+                if audio_content.raw_audio is not None and isinstance(audio_content.raw_audio, tuple):
+                        waveform, sample_rate = audio_content.raw_audio
+                elif audio_content.audio_url not in ["placeholder", ""]:
+                    waveform, sample_rate = torchaudio.load(audio_content.audio_url)                
+                elif audio_content.raw_audio is not None:                                            
+                     buffer = BytesIO(base64.b64decode(audio_content.raw_audio))
+                     waveform, sample_rate = torchaudio.load(buffer)
                 if waveform is not None:
                     # Convert to mono if not already
                     if waveform.shape[0] > 1:
@@ -354,22 +363,27 @@ class HiggsAudioServeEngine:
 
                     # Cache the computed tokens for file-based audio
                     if (audio_content.audio_url not in ["placeholder", ""] and
-                        audio_content.raw_audio is None):
+                        (audio_content.raw_audio is None or
+                        (isinstance(audio_content.raw_audio, tuple) and isinstance(audio_content.raw_audio[0], torch.Tensor))
+                        )):
 
                         try:
                             from utilities.token_cache import cache_audio_tokens
 
-                            # Use pre-computed hash if available, otherwise compute it
                             audio_hash = getattr(audio_content, '_temp_hash', None)
+                            uuid = getattr(audio_content, '_temp_uuid', 0)
 
                             cache_audio_tokens(
                                 audio_content.audio_url,
                                 audio_ids,
-                                audio_hash=audio_hash
+                                audio_hash=audio_hash,
+                                uuid=uuid
                             )
                             logger.info(f"Cached discrete audio tokens for {audio_content.audio_url}")
 
                         except (ImportError, Exception) as e:
+                            import traceback
+                            print(traceback.format_exc())
                             # Cache module not available or error, continue without caching
                             logger.debug(f"Cache not available: {e}")
 

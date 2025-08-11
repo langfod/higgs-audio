@@ -14,6 +14,7 @@ from utilities.model_whisper_utils import (initialize_whisper_model,
                                             transcribe_audio_with_whisper)
 from utilities.text_utils import pre_process_text
 from utilities.token_cache import enable_token_cache, get_cache_stats
+from utilities.voice_style_describer import initialize_describer_models
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 current_dir = Path.cwd()
@@ -23,6 +24,7 @@ enable_token_cache(memory_cache=True, disk_cache=True)
 try:
     WHISPER_ENGINE = initialize_whisper_model()
     HIGGS_ENGINE = initialize_higgs_model(whisper_model=WHISPER_ENGINE, quantization=True)
+    initialize_describer_models(use_accent=True)
 except Exception as e:
     logger.error(f"Failed to initialize models: {str(e)}")
     exit(1)

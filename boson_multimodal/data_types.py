@@ -1,14 +1,14 @@
 """Basic data types for multimodal ChatML format."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
-
+from typing import Dict, List, Optional, Tuple, Union
+import numpy as np
 
 @dataclass
 class AudioContent:
     audio_url: str
     # Base64 encoded audio bytes
-    raw_audio: Optional[str] = None
+    raw_audio: Optional[Tuple[np.ndarray, int]] | str = None
     offset: Optional[float] = None
     duration: Optional[float] = None
     row_id: Optional[int] = None
